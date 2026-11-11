@@ -39,13 +39,17 @@ simpler one on small synthetic inputs before being trusted at scale:
 a brute-force reference (`NaiveFrameDp`), an O(N*M) CPU version of the
 same recurrence (`FastFrameDp`), linear-memory path reconstruction
 (`Backtrack`), and a GPU/streaming version of all of the above
-(`StreamingBacktrack`) usable on whole-film-length inputs.
+(`StreamingBacktrack`) usable on whole-film-length inputs. `AlignFrames`
+is the public entry point tying all of that together.
 """
+import dataclasses
 import functools
+from typing import List, Tuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import numpy.typing as npt
 
 # Diagnostic counters (not thread-safe - fine for single-process tests/
 # scripts): lets tests confirm the in-flight-jump split case (see
@@ -563,3 +567,136 @@ def StreamingBacktrack(left_onehot,
                              right_cost_rev, c0, c1, N_total, M_total,
                              i_dest, i_hi, j_star, j_hi, base_size, chunk)
   return left + jump_segment + right
+
+
+# --- Public API ---------------------------------------------------------
+
+_TERNARY_COST_TABLE = np.array([[0, 1, 2], [1, 0, 1], [2, 1, 0]],
+                               dtype=np.float32)
+_TERNARY_EYE = np.eye(3, dtype=np.float32)
+
+
+def OneHot(signatures: npt.ArrayLike) -> np.ndarray:
+  """One-hot encodes a `(N, D)` array of ternary ({0,1,2}) per-frame
+  descriptors (e.g. ffmpeg's MPEG-7 `signature` filter output) into a
+  `(N, 3*D)` array such that `OneHot(left) @ CostTransform(right).T`
+  gives the L1 distance matrix between every pair of frames as a single
+  GEMM - what `StreamingBacktrack` needs as `left_onehot`/
+  `left_onehot_rev`."""
+  sig = np.asarray(signatures, dtype=np.int32)
+  return _TERNARY_EYE[sig].reshape(sig.shape[0], -1)
+
+
+def CostTransform(signatures: npt.ArrayLike) -> np.ndarray:
+  """The `OneHot` GEMM's other operand - see `OneHot`'s docstring. What
+  `StreamingBacktrack` needs as `right_cost`/`right_cost_rev`."""
+  sig = np.asarray(signatures, dtype=np.int32)
+  return _TERNARY_COST_TABLE[sig].reshape(sig.shape[0], -1)
+
+
+@dataclasses.dataclass
+class FrameDpParams:
+  """Tunable cost-model parameters for `AlignFrames`.
+
+  `c0`/`c1` define a jump's cost: skipping `k` frames on one side
+  (content present in only one input) costs `c0 + c1*k`, independent of
+  where the jump starts (see the module docstring). The defaults are
+  the values measured against a real pair of differently-cut film
+  releases (see `docs/frame_dp_align_notes.md`) - a reasonable starting
+  point for similar material, not a universal constant; recalibrate
+  (the same way `avtools`' `align_films.EstimateGapCost` measures
+  `gap_cost` rather than guessing it) before relying on these for a
+  very different kind of input.
+
+  `base_size`/`chunk` are performance knobs for `StreamingBacktrack`,
+  not part of the cost model: `base_size` is the sub-grid size below
+  which Hirschberg's recursion switches to the small, full-backpointer
+  base case; `chunk` is how many rows of the cost matrix are swept per
+  GPU call in between.
+  """
+  c0: float = 2000.0
+  c1: float = 280.0
+  base_size: int = 500
+  chunk: int = 80
+
+
+@dataclasses.dataclass
+class AlignedBlock:
+  """One contiguous run of matched frames, `[left_start, left_end)` on
+  the left side corresponding to `[right_start, right_end)` on the
+  right (both ranges always the same length - a 1:1 frame match)."""
+  left_start: int
+  left_end: int
+  right_start: int
+  right_end: int
+
+
+@dataclasses.dataclass
+class UniqueBlock:
+  """One contiguous run of frames present in only one of the two
+  sequences - a jump, in `[start, end)` frame-index terms on that
+  side."""
+  side: str  # 'left' or 'right'.
+  start: int
+  end: int
+
+
+@dataclasses.dataclass
+class FrameAlignmentResult:
+  aligned: List[AlignedBlock]
+  unique: List[UniqueBlock]
+
+
+def _PathToResult(path: List[Tuple[str, int, int, int, int]]
+                  ) -> FrameAlignmentResult:
+  """Collapses a raw `(move, i0, j0, i1, j1)` segment list (one match
+  edge per segment, one segment per jump) into merged blocks - the
+  shape of result `avtools`' `align_films.AlignmentResult` already
+  uses, in frame-
+  index rather than time terms."""
+  aligned: List[AlignedBlock] = []
+  unique: List[UniqueBlock] = []
+  for move, i0, j0, i1, j1 in path:
+    if move == 'diag':
+      if (aligned and aligned[-1].left_end == i0 and
+          aligned[-1].right_end == j0):
+        aligned[-1].left_end = i1
+        aligned[-1].right_end = j1
+      else:
+        aligned.append(AlignedBlock(i0, i1, j0, j1))
+    elif move == 'ijump':
+      unique.append(UniqueBlock('left', i0, i1))
+    elif move == 'jjump':
+      unique.append(UniqueBlock('right', j0, j1))
+    else:
+      raise ValueError(f'unknown move {move}')
+  return FrameAlignmentResult(aligned=aligned, unique=unique)
+
+
+def AlignFrames(left_signatures: npt.ArrayLike,
+               right_signatures: npt.ArrayLike,
+               params: FrameDpParams = FrameDpParams()) -> FrameAlignmentResult:
+  """Aligns two per-frame descriptor sequences (e.g. MPEG-7 `signature`
+  filter output, one row per frame, ternary {0,1,2} values) at frame
+  resolution, returning which stretches matched and which are unique to
+  one side - see `FrameAlignmentResult`.
+
+  Runs the whole GPU streaming pipeline (`StreamingBacktrack`) under the
+  hood; see the module docstring for the cost model and
+  `docs/frame_dp_align_notes.md` for background. No confidence
+  weighting or drift compensation is applied here - see
+  `docs/frame_dp_align_future_work.md`.
+  """
+  left_sig = np.asarray(left_signatures)
+  right_sig = np.asarray(right_signatures)
+  n, m = left_sig.shape[0], right_sig.shape[0]
+
+  left_onehot = OneHot(left_sig)
+  right_cost = CostTransform(right_sig)
+  left_onehot_rev = OneHot(left_sig[::-1])
+  right_cost_rev = CostTransform(right_sig[::-1])
+
+  path = StreamingBacktrack(left_onehot, right_cost, left_onehot_rev,
+                            right_cost_rev, params.c0, params.c1, n, m, 0,
+                            n, 0, m, params.base_size, params.chunk)
+  return _PathToResult(path)

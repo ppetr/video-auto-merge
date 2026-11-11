@@ -165,3 +165,30 @@ def test_streaming_backtrack_matches_naive_optimum(c0, c1):
     assert ok, msg
     got_cost = frame_dp_align.PathCost(path, D, c0, c1)
     assert got_cost == pytest.approx(true_total, abs=1e-2)
+
+
+def test_align_frames_finds_a_right_side_insert():
+  rng = np.random.RandomState(5)
+  left_sig = _RandomSignatures(rng, 30)
+  extra = _RandomSignatures(rng, 15)
+  right_sig = np.concatenate([left_sig[:10], extra, left_sig[10:]])
+
+  params = frame_dp_align.FrameDpParams(c0=5.0, c1=0.1, base_size=4,
+                                        chunk=3)
+  result = frame_dp_align.AlignFrames(left_sig, right_sig, params)
+
+  assert result.unique == [frame_dp_align.UniqueBlock('right', 10, 25)]
+  assert result.aligned == [
+      frame_dp_align.AlignedBlock(0, 10, 0, 10),
+      frame_dp_align.AlignedBlock(10, 30, 25, 45),
+  ]
+
+
+def test_one_hot_cost_transform_gemm_matches_l1():
+  rng = np.random.RandomState(6)
+  left_sig = _RandomSignatures(rng, 8)
+  right_sig = _RandomSignatures(rng, 5)
+  expected = _L1Cost(left_sig, right_sig)
+  got = frame_dp_align.OneHot(left_sig) @ frame_dp_align.CostTransform(
+      right_sig).T
+  np.testing.assert_allclose(got, expected)
