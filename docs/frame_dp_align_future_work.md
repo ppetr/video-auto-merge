@@ -83,7 +83,7 @@ for this frame-level model.
 
 `PathCost` recomputes a path's cost directly from its segments as a
 sanity check independent of the DP machinery that produced it - but it
-needs the full cost matrix `D` in memory, so it only works at the scale
+needs the full cost matrix in memory, so it only works at the scale
 `NaiveFrameDp`/`Backtrack`'s tests use. A streaming equivalent, able to
 verify a whole-film-scale path's cost without materializing the full
 cost matrix (summing each segment's contribution from chunked GEMMs, the
@@ -91,3 +91,20 @@ same way `StreamingBacktrack` itself avoids materializing it), does not
 exist yet - would be useful as an independent check on a real run,
 separate from trusting the DP/backtracking code path that produced the
 path in the first place.
+
+## Whole-film-scale GPU memory regression test
+
+The three GPU memory-management pitfalls documented in
+`frame_dp_align_notes.md` (JIT-recompilation leak, device-array-slicing
+accumulation during recursion, allocator configuration) were each
+confirmed only by running the real pipeline at whole-film scale - the
+unit tests' tiny inputs (a few dozen frames per side) exercise the same
+code paths for *correctness*, but not at a scale where any of those
+three bugs would reproduce. There is currently no automated test that
+would catch a regression of any of them (e.g. someone reintroducing a
+closure-based jit target "for clarity"). Adding one would mean
+generating or fetching a large-enough synthetic signature pair (likely
+tens of thousands of frames per side - real two-hour-film scale) and
+running `StreamingBacktrack` against it under a memory budget, probably
+as a separate `@pytest.mark.slow`/manual script rather than part of the
+default `pytest test/` run.
