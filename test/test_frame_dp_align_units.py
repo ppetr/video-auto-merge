@@ -71,3 +71,47 @@ def test_identical_sequences_prefer_matching():
   D = _L1Cost(sig, sig)
   F = frame_dp_align.FastFrameDp(D, c0=5.0, c1=1.0)
   assert F[10, 10] == 0.0
+
+
+@pytest.mark.parametrize('c0,c1', [(5.0, 1.0), (20.0, 3.0), (1.0, 0.5)])
+def test_backtrack_matches_naive_optimum(c0, c1):
+  rng = np.random.RandomState(2)
+  for _ in range(10):
+    n = rng.randint(5, 60)
+    m = rng.randint(5, 60)
+    D = _L1Cost(_RandomSignatures(rng, n), _RandomSignatures(rng, m))
+    true_total = frame_dp_align.NaiveFrameDp(D, c0, c1)[n, m]
+
+    path = frame_dp_align.Backtrack(D, c0, c1, base_size=4)
+    ok, msg = frame_dp_align.PathEndpoints(path, n, m)
+    assert ok, msg
+    got_cost = frame_dp_align.PathCost(path, D, c0, c1)
+    assert got_cost == pytest.approx(true_total, abs=1e-2)
+
+
+def test_backtrack_exercises_in_flight_split():
+  # A long run of one-sided content, placed so that Hirschberg's split
+  # row necessarily falls inside the jump (not at either endpoint),
+  # forces the in-flight-jump correction's branch to be taken at least
+  # once - without it, the split would double-charge the jump's flat
+  # c0 cost and this assertion would catch the resulting cost mismatch.
+  # The extra block is on the *left* side (so recovering it is an
+  # i-jump) and placed so it straddles the midpoint of the full left
+  # range - Hirschberg's top-level split row necessarily falls inside
+  # it, not at either endpoint.
+  rng = np.random.RandomState(3)
+  sig = _RandomSignatures(rng, 20)
+  extra = _RandomSignatures(rng, 30)
+  left_sig = np.concatenate([sig[:10], extra, sig[10:]])
+  D = _L1Cost(left_sig, sig)
+  c0, c1 = 5.0, 0.1
+  true_total = frame_dp_align.NaiveFrameDp(D, c0, c1)[50, 20]
+
+  frame_dp_align.SPLIT_STATS['node'] = 0
+  frame_dp_align.SPLIT_STATS['in_flight'] = 0
+  path = frame_dp_align.Backtrack(D, c0, c1, base_size=4)
+  ok, msg = frame_dp_align.PathEndpoints(path, 50, 20)
+  assert ok, msg
+  got_cost = frame_dp_align.PathCost(path, D, c0, c1)
+  assert got_cost == pytest.approx(true_total, abs=1e-2)
+  assert frame_dp_align.SPLIT_STATS['in_flight'] > 0

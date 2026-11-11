@@ -43,6 +43,12 @@ same recurrence (`FastFrameDp`), linear-memory path reconstruction
 """
 import numpy as np
 
+# Diagnostic counters (not thread-safe - fine for single-process tests/
+# scripts): lets tests confirm the in-flight-jump split case (see
+# `_BacktrackRange`) is actually being exercised, not just the simpler
+# node-split case.
+SPLIT_STATS = {'node': 0, 'in_flight': 0}
+
 
 def _CheckDpParams(c0, c1):
   if c0 < 0 or c1 < 0:
@@ -120,3 +126,174 @@ def FastFrameDp(D, c0, c1):
     F_prev = F_cur
 
   return F
+
+
+def BackwardFrameDp(D, c0, c1):
+  """B[i,j] = min cost from (i,j) to (N,M) - the match/jump costs are
+  symmetric under reversal, so this is just `FastFrameDp` run on the
+  reversed problem."""
+  D_rev = D[::-1, ::-1]
+  F_rev = FastFrameDp(D_rev, c0, c1)
+  return F_rev[::-1, ::-1]
+
+
+def CrossingCost(F, B, c0, c1, i_mid):
+  """How the optimal path crosses row `i_mid`, as three length-`M+1`
+  arrays (one per column `j`): `node_cost` (the path has an actual node
+  at `(i_mid,j)`) and `in_flight_cost` (an i-jump that started before
+  `i_mid` and lands after it, without ever touching row `i_mid`) - see
+  the module docstring's point about why a flat-cost jump needs this
+  second case. `crossing_cost` is their minimum, i.e. the true cost of
+  passing through column `j` at row `i_mid` by either means.
+
+  `in_flight_cost(j) = (c0 + min_{i'<i_mid} [F(i',j) - c1*i'])
+                        + min_{i''>=i_mid} [B(i'',j) + c1*i'']`
+
+  - the same `ColMinShifted` quantity `FastFrameDp` already computes
+  while sweeping forward, paired with its mirror-image shifted suffix
+  minimum of the backward values."""
+  N, Mp1 = F.shape[0] - 1, F.shape[1]
+  node_cost = F[i_mid, :] + B[i_mid, :]
+
+  if i_mid > 0:
+    shifted_F = F[:i_mid, :] - c1 * np.arange(i_mid, dtype=np.float64)[:, None]
+    col_min_shifted = shifted_F.min(axis=0)
+  else:
+    col_min_shifted = np.full(Mp1, np.inf)
+  credit0 = c0 + col_min_shifted
+
+  shifted_B = B[i_mid:, :] + c1 * np.arange(i_mid, N + 1,
+                                            dtype=np.float64)[:, None]
+  bcredit_shifted = shifted_B.min(axis=0)
+  in_flight_cost = credit0 + bcredit_shifted
+
+  crossing_cost = np.minimum(node_cost, in_flight_cost)
+  return crossing_cost, node_cost, in_flight_cost
+
+
+def _BruteForceBacktrack(D, c0, c1, i_offset, j_offset):
+  """Base case: O(N*M*(N+M)) backtrack with full backpointers - only for
+  small sub-grids. Returns a list of `(move, i0, j0, i1, j1)` segments in
+  *global* coordinates (`i_offset`/`j_offset` added back in); `move` is
+  one of `'diag'`, `'ijump'`, `'jjump'`."""
+  N, M = D.shape
+  F = np.full((N + 1, M + 1), np.inf)
+  back = [[None] * (M + 1) for _ in range(N + 1)]
+  F[0, 0] = 0.0
+  for i in range(N + 1):
+    for j in range(M + 1):
+      if i == 0 and j == 0:
+        continue
+      best, move = np.inf, None
+      if i > 0 and j > 0:
+        v = F[i - 1, j - 1] + D[i - 1, j - 1]
+        if v < best:
+          best, move = v, ('diag', i - 1, j - 1)
+      if i > 0:
+        ip = np.arange(i)
+        vals = F[:i, j] + c0 + c1 * (i - ip)
+        k = int(np.argmin(vals))
+        if vals[k] < best:
+          best, move = vals[k], ('ijump', k, j)
+      if j > 0:
+        jp = np.arange(j)
+        vals = F[i, :j] + c0 + c1 * (j - jp)
+        k = int(np.argmin(vals))
+        if vals[k] < best:
+          best, move = vals[k], ('jjump', i, k)
+      F[i, j] = best
+      back[i][j] = move
+
+  path = []
+  i, j = N, M
+  while (i, j) != (0, 0):
+    move, pi, pj = back[i][j]
+    path.append((move, pi + i_offset, pj + j_offset, i + i_offset,
+                j + j_offset))
+    i, j = pi, pj
+  path.reverse()
+  return path
+
+
+def Backtrack(D, c0, c1, base_size=40):
+  """Returns the optimal path from `(0,0)` to `(N,M)` as a list of
+  `(move, i0, j0, i1, j1)` segments, `move` one of `'diag'`, `'ijump'`,
+  `'jjump'`. Linear memory (modulo the base case, which is intentionally
+  small) via Hirschberg's divide-and-conquer: recomputes `FastFrameDp`/
+  `BackwardFrameDp` on shrinking sub-grids, so it's O(N*M*log(min(N,M)))
+  time - fine for validation on small/medium inputs; see
+  `StreamingBacktrack` for the GPU version that avoids both the full
+  matrices and the log factor at whole-film scale."""
+  _CheckDpParams(c0, c1)
+  return _BacktrackRange(D, c0, c1, 0, D.shape[0], 0, D.shape[1], base_size)
+
+
+def _BacktrackRange(D, c0, c1, i_lo, i_hi, j_lo, j_hi, base_size):
+  N_sub, M_sub = i_hi - i_lo, j_hi - j_lo
+  if N_sub <= base_size or M_sub <= base_size:
+    return _BruteForceBacktrack(D[i_lo:i_hi, j_lo:j_hi], c0, c1, i_lo, j_lo)
+
+  i_mid_local = N_sub // 2
+  sub_D = D[i_lo:i_hi, j_lo:j_hi]
+  F = FastFrameDp(sub_D, c0, c1)
+  B = BackwardFrameDp(sub_D, c0, c1)
+  crossing_cost, node_cost, in_flight_cost = CrossingCost(
+      F, B, c0, c1, i_mid_local)
+  j_star_local = int(np.argmin(crossing_cost))
+  j_star = j_lo + j_star_local
+  i_mid = i_lo + i_mid_local
+
+  if node_cost[j_star_local] <= in_flight_cost[j_star_local]:
+    SPLIT_STATS['node'] += 1
+    left = _BacktrackRange(D, c0, c1, i_lo, i_mid, j_lo, j_star, base_size)
+    right = _BacktrackRange(D, c0, c1, i_mid, i_hi, j_star, j_hi, base_size)
+    return left + right
+
+  SPLIT_STATS['in_flight'] += 1
+
+  # The in-flight i-jump spans i_mid - recover its true source/
+  # destination rows (not i_mid itself) so the two halves don't each pay
+  # c0 for "their half" of what is really a single jump.
+  shifted_F = F[:i_mid_local, :] - c1 * np.arange(
+      i_mid_local, dtype=np.float64)[:, None]
+  i_source_local = int(np.argmin(shifted_F[:, j_star_local]))
+  i_source = i_lo + i_source_local
+  shifted_B = B[i_mid_local:, :] + c1 * np.arange(
+      i_mid_local, N_sub + 1, dtype=np.float64)[:, None]
+  i_dest_local = i_mid_local + int(np.argmin(shifted_B[:, j_star_local]))
+  i_dest = i_lo + i_dest_local
+
+  left = _BacktrackRange(D, c0, c1, i_lo, i_source, j_lo, j_star, base_size)
+  jump_segment = [('ijump', i_source, j_star, i_dest, j_star)]
+  right = _BacktrackRange(D, c0, c1, i_dest, i_hi, j_star, j_hi, base_size)
+  return left + jump_segment + right
+
+
+def PathCost(path, D, c0, c1):
+  """Recomputes a path's total cost directly from its segments - a
+  self-contained sanity check independent of the DP machinery that
+  produced it."""
+  total = 0.0
+  for move, i0, j0, i1, j1 in path:
+    if move == 'diag':
+      total += D[i0, j0]
+    elif move in ('ijump', 'jjump'):
+      length = (i1 - i0) + (j1 - j0)
+      total += c0 + c1 * length
+    else:
+      raise ValueError(f'unknown move {move}')
+  return total
+
+
+def PathEndpoints(path, N, M):
+  """Checks a path's segments chain continuously from `(0,0)` to
+  `(N,M)` - returns `(True, 'ok')` or `(False, <message>)`, for use in
+  tests."""
+  i, j = 0, 0
+  for move, i0, j0, i1, j1 in path:
+    if (i0, j0) != (i, j):
+      return False, f'gap: expected to start at {(i,j)}, segment starts at {(i0,j0)}'
+    i, j = i1, j1
+  if (i, j) != (N, M):
+    return False, f'path ends at {(i,j)}, expected {(N,M)}'
+  return True, 'ok'
