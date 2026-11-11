@@ -1,16 +1,12 @@
 # Vim
 *.sw[po]
-# Test data
-test*.mkv
-film*.mkv
-film*.yaml
-diag_region.py
-diag_*.xml
-diag_*.mkv
-align_films_cache/
-.sigcache/
 
 .claude/
+
+# Ephemeral, session-specific handoff notes between Claude Code
+# sessions - not part of the project's permanent documentation (see
+# docs/frame_dp_align_notes.md/_future_work.md for that).
+docs/handoff/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
