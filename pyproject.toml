@@ -40,3 +40,11 @@ test = ["pytest"]
 
 [tool.pytest.ini_options]
 testpaths = ["test"]
+# gpu-marked tests (test_frame_dp_align_gpu.py) are excluded by
+# default - they re-run the regular suite gated on jax actually having
+# a real GPU device selected, which isn't guaranteed (or wanted) for a
+# routine `pytest` run. Run them explicitly with `pytest -m gpu`.
+addopts = "-m 'not gpu'"
+markers = [
+    "gpu: re-runs the suite gated on jax having a real GPU device",
+]

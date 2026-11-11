@@ -46,19 +46,27 @@ pytest test/ -v
 `jax` picks whichever backend its installed `jaxlib` provides - there
 is no test-specific flag for this. Plain `pip install -e .[test]`
 pulls in a CPU-only `jaxlib` by default, so the suite above runs
-(correctly, just slower) on CPU. To actually exercise the GPU path,
-install a CUDA-enabled `jaxlib` instead (matching your CUDA version,
-e.g. `pip install -U "jax[cuda12]"`) and confirm it *before* running
-tests:
+(correctly, just slower) on CPU.
+
+To actually exercise the GPU path, install a CUDA-enabled `jaxlib`
+instead (matching your CUDA version, e.g. `pip install -U
+"jax[cuda12]"`), then explicitly run the `gpu`-marked suite in
+`test/test_frame_dp_align_gpu.py` - the *same* tests as above, just
+re-collected under a fixture that fails loudly if jax doesn't resolve
+to a real GPU device, rather than silently running on CPU under a
+false "GPU-tested" label:
 
 ```
-python -c "import jax; print(jax.devices())"
+pytest -m gpu -v
 ```
 
-A `CudaDevice` in that output (not `CpuDevice`) means the same test
-command now runs its JAX code on the GPU - nothing else changes.
+This is excluded from a plain `pytest`/`pytest test/` run on purpose
+(see `addopts` in `pyproject.toml`) - a routine test run shouldn't
+require a GPU to pass. `pytest test/test_frame_dp_align_gpu.py` alone
+(without `-m gpu`) will report 0 selected for the same reason; the
+marker has to be given explicitly.
 
-Note that the unit tests use tiny inputs (a few dozen frames per side),
+Note that both suites use tiny inputs (a few dozen frames per side),
 so they check *correctness* of the GPU code path, not the whole-film-
 scale memory behavior documented in `docs/frame_dp_align_notes.md`
 (the three GPU memory pitfalls found during development only manifest
