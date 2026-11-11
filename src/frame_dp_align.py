@@ -41,6 +41,10 @@ same recurrence (`FastFrameDp`), linear-memory path reconstruction
 (`Backtrack`), and a GPU/streaming version of all of the above
 (`StreamingBacktrack`) usable on whole-film-length inputs.
 """
+import functools
+
+import jax
+import jax.numpy as jnp
 import numpy as np
 
 # Diagnostic counters (not thread-safe - fine for single-process tests/
@@ -297,3 +301,265 @@ def PathEndpoints(path, N, M):
   if (i, j) != (N, M):
     return False, f'path ends at {(i,j)}, expected {(N,M)}'
   return True, 'ok'
+
+
+# --- GPU/streaming path: usable at whole-film scale -------------------
+#
+# `Backtrack` above recomputes full (N+1,M+1) `FastFrameDp`/
+# `BackwardFrameDp` matrices at every recursion level - fine for
+# validation, but neither the time (an extra log factor) nor the memory
+# (the full matrix) works at whole-film scale (hundreds of thousands of
+# frames per side). The functions below replace both with chunked GPU
+# sweeps that only ever materialize one row's cost block at a time.
+
+
+def _HardRowStep(F_prev, col_min_shifted, i, D_row, c0, c1, a0_override=None):
+  """One row of the `FastFrameDp` recurrence, as JAX array ops - same
+  math as the CPU version's loop body, so it composes into
+  `jax.lax.scan` for a whole chunk of rows at once (see `_ChunkedSweep`).
+
+  `a0_override` patches in the true `F(0,0)=0` base case (row 0 has no
+  real predecessor row) - it must be applied to `A` itself, *before* the
+  prefix-min below, not patched onto the final row afterward: every
+  later column's value depends on `A[0]` through that scan."""
+  M = F_prev.shape[0] - 1
+  j_idx = jnp.arange(M + 1, dtype=jnp.float32)
+
+  diag = jnp.concatenate([jnp.array([jnp.inf]), F_prev[:-1] + D_row])
+  ijump = c0 + c1 * i + col_min_shifted
+  A = jnp.minimum(diag, ijump)
+  if a0_override is not None:
+    A = A.at[0].set(a0_override)
+
+  B = A - c1 * j_idx
+  R = jax.lax.cummin(B)
+  R_shift = jnp.concatenate([jnp.array([jnp.inf]), R[:-1]])
+  F_cur = jnp.minimum(A, c0 + c1 * j_idx + R_shift)
+  new_col_min_shifted = jnp.minimum(col_min_shifted, F_cur - c1 * i)
+  return F_cur, new_col_min_shifted
+
+
+def _MakeRunChunk():
+  """Builds the single, module-level-cached jit function used for every
+  chunk of rows, with `c0`/`c1` as traced (not closed-over) arguments -
+  so JAX compiles it once per distinct `(chunk_len, M)` shape and reuses
+  that executable across an entire Hirschberg recursion, no matter how
+  many times `StreamingBacktrack` calls back in.
+
+  Besides `F`/`col_min_shifted`, this also tracks `src`: the row index
+  that *achieves* the running `col_min_shifted` for each column - needed
+  to recover an in-flight jump's true start/end row without ever
+  materializing the full matrix (see `StreamingBacktrack`).
+
+  This must NOT be a closure created fresh inside `_ChunkedSweep` on
+  every call - a divide-and-conquer recursion calls back into this
+  hundreds of times, and a freshly-compiled executable per call
+  accumulates on the GPU for as long as anything keeps a reference to
+  it, exhausting a few GB of VRAM long before any estimate based on
+  actual data volume would predict (confirmed as the real cause of a
+  `RESOURCE_EXHAUSTED` error that plain data-size math said shouldn't
+  happen)."""
+
+  @functools.partial(jax.jit, static_argnums=(7,))
+  def RunChunk(F, cms, src, i0, D_chunk, c0, c1, M):
+    del M  # only needed to pin the jit cache key to this chunk's shape.
+
+    def step(carry, D_row):
+      F_prev, cms, src, i = carry
+      F_cur, new_cms = _HardRowStep(F_prev, cms, i, D_row, c0, c1)
+      improved = new_cms < cms
+      new_src = jnp.where(improved, i, src)
+      return (F_cur, new_cms, new_src, i + 1.0), None
+
+    (F_final, cms_final, src_final, i_final), _ = jax.lax.scan(
+        step, (F, cms, src, i0), D_chunk)
+    return F_final, cms_final, src_final, i_final
+
+  return RunChunk
+
+
+_RUN_CHUNK = None
+
+
+def _GetRunChunk():
+  global _RUN_CHUNK
+  if _RUN_CHUNK is None:
+    _RUN_CHUNK = _MakeRunChunk()
+  return _RUN_CHUNK
+
+
+def _ChunkedSweep(sig, right_cost, c0, c1, stop_row, chunk):
+  """Runs the forward sweep through `stop_row` frames of `sig`, tracking
+  `col_min_shifted` *and* which row achieves it for each column. Returns
+  `(F_at_stop_row, cms_before_last, src_before_last, cms_after_last,
+  src_after_last)` - both snapshots, since the forward and backward
+  checkpoints need opposite ones (see `ForwardCheckpoint`/
+  `BackwardCheckpoint`).
+
+  `sig`/`right_cost` are expected as plain numpy arrays, not already on
+  device - only `right_cost` (this sub-range's size) and one
+  `chunk`-sized slice of `sig` at a time are moved to the device, both
+  freed when this function returns. Hirschberg's recursion holds many
+  overlapping sub-range slices alive on the call stack at once; if the
+  *caller* kept its encodings as device arrays and this function sliced
+  them, each outstanding stack frame would pin a distinct device-side
+  copy for as long as it's live, rather than the cheap host-side numpy
+  view this relies on instead (confirmed as the real cause of an
+  out-of-memory failure on an input that comfortably fits on the GPU by
+  itself - not a data-volume problem, a reference-lifetime one)."""
+  M = right_cost.shape[0]
+  run_chunk = _GetRunChunk()
+  right_cost_dev = jnp.asarray(right_cost)
+
+  F0 = jnp.full(M + 1, jnp.inf, dtype=jnp.float32)
+  cms0 = jnp.full(M + 1, jnp.inf, dtype=jnp.float32)
+  src0 = jnp.zeros(M + 1, dtype=jnp.float32)  # value irrelevant - cms0 is
+  # +inf so row 0 always "improves", overwriting src regardless.
+  dummy = jnp.zeros(M, dtype=jnp.float32)
+  F, cms = _HardRowStep(F0, cms0, 0.0, dummy, c0, c1, a0_override=0.0)
+  src = jnp.where(cms < cms0, 0.0, src0)
+  i = jnp.float32(1.0)
+
+  if stop_row == 0:
+    return F, cms0, src0, cms, src
+
+  start = 0
+  while start < stop_row - 1:
+    end = min(start + chunk, stop_row - 1)
+    D_chunk = jnp.asarray(sig[start:end]) @ right_cost_dev.T
+    F, cms, src, i = run_chunk(F, cms, src, i, D_chunk, c0, c1, M)
+    start = end
+
+  cms_before_last, src_before_last = cms, src
+  D_last = jnp.asarray(sig[stop_row - 1:stop_row]) @ right_cost_dev.T
+  F, cms, src, i = run_chunk(F, cms, src, i, D_last, c0, c1, M)
+  return F, cms_before_last, src_before_last, cms, src
+
+
+def ForwardCheckpoint(left_onehot, right_cost, c0, c1, i_mid, chunk=300):
+  """`F(i_mid,:)`, `ColMinShifted_{i_mid}(:)` and its source row (rows
+  `0..i_mid-1`) - the forward half of what the Hirschberg split at
+  `i_mid` needs, without materializing the full matrix."""
+  F, cms_before, src_before, _, _ = _ChunkedSweep(left_onehot, right_cost,
+                                                  c0, c1, i_mid, chunk)
+  return np.array(F), np.array(cms_before), np.array(src_before)
+
+
+def BackwardCheckpoint(left_onehot_rev, right_cost_rev, c0, c1, N, M, i_mid,
+                       chunk=300):
+  """`B(i_mid,:)`, `BCreditShifted_{i_mid}(:) = min_{i''>=i_mid}
+  [B(i'',j)+c1*i'']` and its source row (in *original* coordinates), via
+  the reversed sweep: running `_ChunkedSweep` on the reversed sequences
+  gives `F'(k,j') = B(N-k,M-j')`, so `B(i_mid,:)` is `F'` at row
+  `k=N-i_mid`.
+
+  `BCreditShifted`/its source row are NOT simply the reversed sweep's
+  own `ColMinShifted`/`src` at that point - the index reversal needs an
+  extra shift to undo, re-derived here (and checked numerically against
+  the CPU-exact `BackwardFrameDp`/`CrossingCost` before being trusted)
+  as:
+
+    BCreditShifted_{i_mid}(j) = ColMinShifted'_{N-i_mid+1}(M-j) + c1*N
+    i_dest(j) [the row achieving it] = N - source'_{N-i_mid+1}(M-j)
+
+  i.e. run the reversed sweep *through* row `k=N-i_mid` (inclusive, not
+  "before" it as the forward checkpoint does), take its
+  `ColMinShifted`/source snapshot from *after* that row, then reverse
+  the column axis, shift the value by `+c1*N` and convert the row index
+  via `N-k'`.
+
+  `left_onehot_rev`/`right_cost_rev` must already be the *reversed*
+  sequences (reverse frame order on both sides before building the
+  cost-ready encoding - reversing the encoded arrays afterward would not
+  reverse the underlying cost matrix correctly)."""
+  k = N - i_mid
+  F_rev, _, _, cms_after, src_after = _ChunkedSweep(left_onehot_rev,
+                                                    right_cost_rev, c0, c1,
+                                                    k, chunk)
+  B_mid = np.array(F_rev)[::-1]
+  bcredit_shifted = np.array(cms_after)[::-1] + c1 * N
+  i_dest = N - np.array(src_after)[::-1]
+  return B_mid, bcredit_shifted, i_dest
+
+
+def StreamingBacktrack(left_onehot,
+                       right_cost,
+                       left_onehot_rev,
+                       right_cost_rev,
+                       c0,
+                       c1,
+                       N_total,
+                       M_total,
+                       i_lo,
+                       i_hi,
+                       j_lo,
+                       j_hi,
+                       base_size=500,
+                       chunk=300):
+  """Same contract as `Backtrack`, but using the GPU streaming
+  checkpoints above instead of full-matrix `FastFrameDp`/
+  `BackwardFrameDp` - usable at whole-film scale (only the base case
+  ever materializes a small cost sub-block).
+
+  `left_onehot`/`right_cost` and their `_rev` counterparts must be the
+  cost-ready encodings of the *entire* original sequences (and their
+  full reversals) - the same arrays at every recursion level; slicing to
+  the current sub-range happens internally. `N_total`/`M_total` are the
+  full sequence lengths (needed to correctly slice the reversed arrays
+  for a sub-range)."""
+  N_sub, M_sub = i_hi - i_lo, j_hi - j_lo
+  if N_sub <= base_size or M_sub <= base_size:
+    D_sub = np.array(left_onehot[i_lo:i_hi] @ right_cost[j_lo:j_hi].T)
+    return _BruteForceBacktrack(D_sub, c0, c1, i_lo, j_lo)
+
+  i_mid_local = N_sub // 2
+  i_mid = i_lo + i_mid_local
+
+  F_mid, cms_before, src_before = ForwardCheckpoint(
+      left_onehot[i_lo:i_hi], right_cost[j_lo:j_hi], c0, c1, i_mid_local,
+      chunk)
+  # Reversed sub-range of [i_lo,i_hi)/[j_lo,j_hi) within the full
+  # reversed arrays.
+  left_rev_sub = left_onehot_rev[N_total - i_hi:N_total - i_lo]
+  right_rev_sub = right_cost_rev[M_total - j_hi:M_total - j_lo]
+  B_mid, bcredit, i_dest_full = BackwardCheckpoint(left_rev_sub,
+                                                   right_rev_sub, c0, c1,
+                                                   N_sub, M_sub,
+                                                   i_mid_local, chunk)
+  # i_dest_full came back in [i_lo,i_hi)-local coordinates (N_sub was
+  # passed as the local length) - shift to global, same as src_before.
+  i_dest_full = i_dest_full + i_lo
+  src_before_full = src_before + i_lo
+
+  node_cost = F_mid + B_mid
+  in_flight_cost = c0 + cms_before + bcredit
+  crossing_cost = np.minimum(node_cost, in_flight_cost)
+  j_star_local = int(np.argmin(crossing_cost))
+  j_star = j_lo + j_star_local
+
+  if node_cost[j_star_local] <= in_flight_cost[j_star_local]:
+    SPLIT_STATS['node'] += 1
+    left = StreamingBacktrack(left_onehot, right_cost, left_onehot_rev,
+                              right_cost_rev, c0, c1, N_total, M_total,
+                              i_lo, i_mid, j_lo, j_star, base_size, chunk)
+    right = StreamingBacktrack(left_onehot, right_cost, left_onehot_rev,
+                               right_cost_rev, c0, c1, N_total, M_total,
+                               i_mid, i_hi, j_star, j_hi, base_size, chunk)
+    return left + right
+
+  SPLIT_STATS['in_flight'] += 1
+  # The in-flight i-jump's true source/destination rows, recovered
+  # directly from the checkpoints' source-row tracking (no full matrix
+  # needed) - same reasoning as `_BacktrackRange`'s node_cost/
+  # in_flight_cost comparison above, just without materializing F/B.
+  i_source = int(src_before_full[j_star_local])
+  i_dest = int(i_dest_full[j_star_local])
+
+  left = StreamingBacktrack(left_onehot, right_cost, left_onehot_rev,
+                            right_cost_rev, c0, c1, N_total, M_total, i_lo,
+                            i_source, j_lo, j_star, base_size, chunk)
+  jump_segment = [('ijump', i_source, j_star, i_dest, j_star)]
+  right = StreamingBacktrack(left_onehot, right_cost, left_onehot_rev,
+                             right_cost_rev, c0, c1, N_total, M_total,
+                             i_dest, i_hi, j_star, j_hi, base_size, chunk)
+  return left + jump_segment + right

@@ -23,7 +23,12 @@ are a faithful test input, not a simplification of the real one)."""
 import numpy as np
 import pytest
 
-import frame_dp_align
+jax = pytest.importorskip('jax')  # frame_dp_align imports jax at module
+# scope for its GPU path, so the whole file (including the CPU-only
+# tests above) needs it to even import the module - skip together
+# rather than trying to make the CPU tests independently importable.
+
+import frame_dp_align  # noqa: E402  pylint: disable=wrong-import-position
 
 _NDIM = 12  # small, like the real MPEG-7 signature's ternary descriptor.
 
@@ -115,3 +120,48 @@ def test_backtrack_exercises_in_flight_split():
   got_cost = frame_dp_align.PathCost(path, D, c0, c1)
   assert got_cost == pytest.approx(true_total, abs=1e-2)
   assert frame_dp_align.SPLIT_STATS['in_flight'] > 0
+
+
+def _OneHotTernary(sig):
+  return np.eye(3, dtype=np.float32)[sig].reshape(sig.shape[0], -1)
+
+
+def _CostTransformTernary(sig):
+  cost_table = np.array([[0, 1, 2], [1, 0, 1], [2, 1, 0]], dtype=np.float32)
+  return cost_table[sig].reshape(sig.shape[0], -1)
+
+
+@pytest.mark.parametrize('c0,c1', [(5.0, 1.0), (20.0, 3.0), (1.0, 0.5)])
+def test_streaming_backtrack_matches_naive_optimum(c0, c1):
+  rng = np.random.RandomState(4)
+  for _ in range(6):
+    n = rng.randint(5, 60)
+    m = rng.randint(5, 60)
+    left_sig = _RandomSignatures(rng, n)
+    right_sig = _RandomSignatures(rng, m)
+    D = _L1Cost(left_sig, right_sig)
+    true_total = frame_dp_align.NaiveFrameDp(D, c0, c1)[n, m]
+
+    left_onehot = _OneHotTernary(left_sig)
+    right_cost = _CostTransformTernary(right_sig)
+    left_onehot_rev = _OneHotTernary(left_sig[::-1])
+    right_cost_rev = _CostTransformTernary(right_sig[::-1])
+
+    path = frame_dp_align.StreamingBacktrack(left_onehot,
+                                             right_cost,
+                                             left_onehot_rev,
+                                             right_cost_rev,
+                                             c0,
+                                             c1,
+                                             n,
+                                             m,
+                                             0,
+                                             n,
+                                             0,
+                                             m,
+                                             base_size=4,
+                                             chunk=3)
+    ok, msg = frame_dp_align.PathEndpoints(path, n, m)
+    assert ok, msg
+    got_cost = frame_dp_align.PathCost(path, D, c0, c1)
+    assert got_cost == pytest.approx(true_total, abs=1e-2)
