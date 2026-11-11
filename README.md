@@ -36,6 +36,35 @@ library function, not a script.
   module docstring for the cost model and `FrameDpParams` for the
   tunable parameters).
 
+## Testing
+
+```
+pip install -e .[test]
+pytest test/ -v
+```
+
+`jax` picks whichever backend its installed `jaxlib` provides - there
+is no test-specific flag for this. Plain `pip install -e .[test]`
+pulls in a CPU-only `jaxlib` by default, so the suite above runs
+(correctly, just slower) on CPU. To actually exercise the GPU path,
+install a CUDA-enabled `jaxlib` instead (matching your CUDA version,
+e.g. `pip install -U "jax[cuda12]"`) and confirm it *before* running
+tests:
+
+```
+python -c "import jax; print(jax.devices())"
+```
+
+A `CudaDevice` in that output (not `CpuDevice`) means the same test
+command now runs its JAX code on the GPU - nothing else changes.
+
+Note that the unit tests use tiny inputs (a few dozen frames per side),
+so they check *correctness* of the GPU code path, not the whole-film-
+scale memory behavior documented in `docs/frame_dp_align_notes.md`
+(the three GPU memory pitfalls found during development only manifest
+around ~10^5 x 10^5-scale inputs). There is no large-scale stress test
+in this repo yet - see `docs/frame_dp_align_future_work.md`.
+
 ## Contributions
 
 Please see [Code of Conduct](docs/code-of-conduct.md) and
