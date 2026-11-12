@@ -49,14 +49,31 @@ command-line tool yet - `AlignFrames` is a library function, not a script.
 | Cutting and joining audio/video with ffmpeg | Not implemented |
 | Subtitles for spans without matching audio | Not implemented (planned, optional) |
 | Constant-speed drift compensation (e.g. PAL/NTSC) | Not implemented (deferred, see [future work](docs/frame_dp_align_future_work.md)) |
-| Command-line interface | Not implemented |
+| Command-line interface | `video-auto-merge align` only (see [Usage](#usage)) |
 
 The alignment algorithm itself was validated on a real pair of
 differently-cut film releases in a prototype of this code; it has not
 yet been re-run against real data in this repository.
 
+## Usage
+
+```
+video-auto-merge align film-L.mkv film-R.mkv --cache-dir signatures/
+```
+
+Prints a table of the blocks present in only one of the two videos, in the
+order in which they would appear in a film assembled from both (`out` is
+the block's start in that film). `--all` lists matched blocks too, `-o`
+writes the table to a file. Per-frame signatures are slow to compute (they
+use ffmpeg, with `-hwaccel cuda` decoding by default; `--hwaccel none`
+turns it off), so they are cached in `--cache-dir` and reused on later
+runs. The alignment itself needs a GPU for whole-film inputs (see
+Requirements); `--c0`/`--c1` set the cost of a jump over frames present
+in only one video.
+
 ## Requirements
 
+- `ffmpeg` in `$PATH`, for the per-frame signatures.
 - `jax` (CPU-only works for correctness; a CUDA-enabled `jaxlib` is
   needed for whole-film-scale performance - see the module docstring of
   [`src/video_auto_merge/frame_dp_align.py`](src/video_auto_merge/frame_dp_align.py) for the cost model and `FrameDpParams` for the
