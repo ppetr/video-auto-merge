@@ -14,6 +14,7 @@
 """End-to-end test of the command-line interface (real ffmpeg and jax)."""
 
 import shutil
+import subprocess
 
 import pytest
 
@@ -62,3 +63,40 @@ def test_align_writes_the_table_to_a_file(tmp_path, capsys,
 
   assert capsys.readouterr().out == ''
   assert 'right' in output.read_text()
+
+
+def _with_audio(video, frequency):
+  out = video.with_name(f'{video.stem}-audio.mkv')
+  subprocess.run([
+      'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-i',
+      str(video), '-f', 'lavfi', '-i', f'sine=frequency={frequency}',
+      '-shortest', '-c:v', 'copy', '-c:a', 'libopus',
+      str(out)
+  ],
+                 check=True)
+  return out
+
+
+def test_merge_attaches_right_audio_to_left_video(tmp_path,
+                                                  inserted_segment_videos):
+  left, right = inserted_segment_videos.paths
+  left, right = _with_audio(left, 220), _with_audio(right, 880)
+  output = tmp_path / 'merged.mkv'
+
+  assert cli.main([
+      'merge',
+      str(left),
+      str(right),
+      str(output), '--cache-dir',
+      str(tmp_path / 'cache'), '--hwaccel', 'none', '--c0', '500', '--c1', '50'
+  ]) == 0
+
+  probe = subprocess.run([
+      'ffprobe', '-v', 'error', '-show_entries', 'stream=codec_type', '-of',
+      'csv=p=0',
+      str(output)
+  ],
+                         check=True,
+                         capture_output=True,
+                         text=True).stdout.split()
+  assert probe == ['video', 'audio', 'audio']
