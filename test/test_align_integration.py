@@ -44,3 +44,31 @@ def test_detects_a_segment_present_only_in_the_right_video(
   assert [u.side for u in unique] == ['right']
   assert unique[0].end - unique[0].start == pytest.approx(fps * seconds, abs=3)
   assert unique[0].start == pytest.approx(fps * seconds, abs=3)
+
+
+def test_alignment_is_cached_per_parameters(tmp_path, monkeypatch,
+                                            inserted_segment_videos):
+  left, right = inserted_segment_videos.paths
+  params = frame_dp_align.FrameDpParams(c0=500.0, c1=50.0)
+  first = align.AlignVideos(left,
+                            right,
+                            tmp_path / 'cache',
+                            params,
+                            pre_input_args=[])
+
+  def fail(*_):
+    raise AssertionError('alignment was recomputed')
+
+  monkeypatch.setattr(frame_dp_align, 'AlignFrames', fail)
+  second = align.AlignVideos(left,
+                             right,
+                             tmp_path / 'cache',
+                             params,
+                             pre_input_args=[])
+
+  assert second.result == first.result
+  assert list(second.left_times) == list(first.left_times)
+  assert list(second.right_times) == list(first.right_times)
+  other = frame_dp_align.FrameDpParams(c0=501.0, c1=50.0)
+  assert (align.AlignmentCachePath(tmp_path, left, right, other)
+          != align.AlignmentCachePath(tmp_path, left, right, params))

@@ -21,6 +21,8 @@ result together with the frame timestamps needed to interpret it.
 """
 import asyncio
 import dataclasses
+import hashlib
+import json
 import logging
 import pathlib
 from typing import List
@@ -44,6 +46,45 @@ class VideoAlignment:
   left_times: npt.ArrayLike
   right_times: npt.ArrayLike
   result: frame_dp_align.FrameAlignmentResult
+
+
+def AlignmentCachePath(cache_dir: pathlib.Path, left_video: pathlib.PurePath,
+                       right_video: pathlib.PurePath,
+                       params: frame_dp_align.FrameDpParams) -> pathlib.Path:
+  """Cache filename for the alignment of the two videos under the cost
+  parameters `params` (`c0`, `c1`; the others only affect speed)."""
+  key = '\0'.join([
+      str(pathlib.Path(left_video).resolve()),
+      str(pathlib.Path(right_video).resolve()),
+      repr(params.c0),
+      repr(params.c1)
+  ])
+  digest = hashlib.sha256(key.encode()).hexdigest()[:16]
+  return cache_dir / f'alignment-{digest}.json'
+
+
+def _SaveAlignment(path: pathlib.Path, alignment: VideoAlignment) -> None:
+  result = alignment.result
+  data = {
+      'left_times': [float(t) for t in alignment.left_times],
+      'right_times': [float(t) for t in alignment.right_times],
+      'aligned': [[b.left_start, b.left_end, b.right_start, b.right_end]
+                  for b in result.aligned],
+      'unique': [[b.side, b.start, b.end] for b in result.unique],
+  }
+  path.parent.mkdir(parents=True, exist_ok=True)
+  temp = path.with_name(path.name + '.tmp')
+  temp.write_text(json.dumps(data))
+  temp.rename(path)
+
+
+def _LoadAlignment(path: pathlib.Path) -> VideoAlignment:
+  data = json.loads(path.read_text())
+  result = frame_dp_align.FrameAlignmentResult(
+      aligned=[frame_dp_align.AlignedBlock(*b) for b in data['aligned']],
+      unique=[frame_dp_align.UniqueBlock(*b) for b in data['unique']])
+  return VideoAlignment(np.asarray(data['left_times']),
+                        np.asarray(data['right_times']), result)
 
 
 async def _EnsureSignatures(ffmpeg_path: pathlib.PurePath,
@@ -71,9 +112,18 @@ def AlignVideos(
   CPU-bound step) into `cache_dir` and reused on later runs for as long as
   the video file is not newer than its cached signature. `pre_input_args`
   go before each ffmpeg `-i`, by default hardware-accelerated decoding.
+  The alignment itself (the slowest step) is cached in `cache_dir` too, per
+  pair of videos and `params.c0`/`params.c1`.
   """
   left_video = pathlib.Path(left_video)
   right_video = pathlib.Path(right_video)
+  cache_path = AlignmentCachePath(pathlib.Path(cache_dir), left_video,
+                                  right_video, params)
+  if cache_path.exists() and cache_path.stat().st_mtime >= max(
+      left_video.stat().st_mtime,
+      right_video.stat().st_mtime):
+    _LOG.info('Reusing cached alignment %s', cache_path)
+    return _LoadAlignment(cache_path)
   left_xml, right_xml = asyncio.run(
       _EnsureSignatures(ffmpeg_path, [left_video, right_video],
                         pathlib.Path(cache_dir), list(pre_input_args)))
@@ -82,4 +132,7 @@ def AlignVideos(
   _LOG.info('Aligning %d x %d frames (can take a long time on a GPU)',
             len(left_times), len(right_times))
   result = frame_dp_align.AlignFrames(left_sigs, right_sigs, params)
-  return VideoAlignment(np.asarray(left_times), np.asarray(right_times), result)
+  alignment = VideoAlignment(np.asarray(left_times), np.asarray(right_times),
+                             result)
+  _SaveAlignment(cache_path, alignment)
+  return alignment
