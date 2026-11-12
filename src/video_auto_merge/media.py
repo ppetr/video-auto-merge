@@ -13,8 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Thin wrappers over ffprobe/ffmpeg: probing, PCM decoding, Opus encoding
-and the final mux."""
+"""Thin wrappers over ffprobe/ffmpeg: probing, PCM decoding, Opus encoding,
+subtitle conversion and the final mux."""
 import dataclasses
 import json
 import pathlib
@@ -26,6 +26,8 @@ import numpy as np
 
 SAMPLE_BYTES = 4
 DEFAULT_BITRATE_PER_CHANNEL = 64000
+TEXT_SUBTITLE_CODECS = frozenset(
+    ['subrip', 'ass', 'ssa', 'mov_text', 'webvtt', 'text'])
 
 
 @dataclasses.dataclass
@@ -40,27 +42,55 @@ class AudioStreamInfo:
   title: Optional[str] = None
 
 
-def ProbeAudioStreams(ffprobe_path: pathlib.PurePath,
-                      path: pathlib.PurePath) -> List[AudioStreamInfo]:
-  """Lists the audio streams of `path`."""
+@dataclasses.dataclass
+class SubtitleStreamInfo:
+  """A subtitle stream of a file. Only text codecs can be re-timed."""
+  index: int
+  codec: str
+  language: Optional[str] = None
+  title: Optional[str] = None
+
+  @property
+  def is_text(self) -> bool:
+    return self.codec in TEXT_SUBTITLE_CODECS
+
+
+def _ProbeStreams(ffprobe_path: pathlib.PurePath, path: pathlib.PurePath,
+                  selector: str) -> List[dict]:
   out = subprocess.run([
       str(ffprobe_path), '-v', 'error', '-print_format', 'json',
-      '-show_streams', '-select_streams', 'a',
+      '-show_streams', '-select_streams', selector,
       str(path)
   ],
                        check=True,
                        capture_output=True).stdout
-  streams = []
-  for stream in json.loads(out)['streams']:
-    tags = stream.get('tags', {})
-    streams.append(
-        AudioStreamInfo(index=stream['index'],
-                        codec=stream['codec_name'],
-                        channels=stream['channels'],
-                        sample_rate=int(stream['sample_rate']),
-                        language=tags.get('language'),
-                        title=tags.get('title')))
-  return streams
+  return json.loads(out)['streams']
+
+
+def ProbeAudioStreams(ffprobe_path: pathlib.PurePath,
+                      path: pathlib.PurePath) -> List[AudioStreamInfo]:
+  """Lists the audio streams of `path`."""
+  return [
+      AudioStreamInfo(index=s['index'],
+                      codec=s['codec_name'],
+                      channels=s['channels'],
+                      sample_rate=int(s['sample_rate']),
+                      language=s.get('tags', {}).get('language'),
+                      title=s.get('tags', {}).get('title'))
+      for s in _ProbeStreams(ffprobe_path, path, 'a')
+  ]
+
+
+def ProbeSubtitleStreams(ffprobe_path: pathlib.PurePath,
+                         path: pathlib.PurePath) -> List[SubtitleStreamInfo]:
+  """Lists the subtitle streams of `path`."""
+  return [
+      SubtitleStreamInfo(index=s['index'],
+                         codec=s.get('codec_name', ''),
+                         language=s.get('tags', {}).get('language'),
+                         title=s.get('tags', {}).get('title'))
+      for s in _ProbeStreams(ffprobe_path, path, 's')
+  ]
 
 
 def _Check(returncode: int, stderr, what: str) -> None:
@@ -145,19 +175,54 @@ def EncodeOpus(ffmpeg_path: pathlib.PurePath,
         proc.wait()
 
 
+def ExtractSrt(ffmpeg_path: pathlib.PurePath, path: pathlib.PurePath,
+               stream_index: int) -> str:
+  """Returns a text subtitle stream of `path` converted to SRT."""
+  with tempfile.TemporaryFile() as stderr:
+    proc = subprocess.run([
+        str(ffmpeg_path), '-v', 'error', '-nostdin', '-i',
+        str(path), '-map', f'0:{stream_index}', '-c:s', 'srt', '-f', 'srt',
+        'pipe:1'
+    ],
+                          stdout=subprocess.PIPE,
+                          stderr=stderr,
+                          check=False)
+    _Check(proc.returncode, stderr, 'ffmpeg subtitle extraction')
+  return proc.stdout.decode('utf-8', errors='replace')
+
+
+def WriteSubtitleTrack(ffmpeg_path: pathlib.PurePath,
+                       srt_path: pathlib.PurePath,
+                       output_path: pathlib.PurePath,
+                       language: Optional[str] = None,
+                       title: Optional[str] = None) -> None:
+  """Wraps an SRT file into a Matroska subtitle file with metadata."""
+  cmd = [
+      str(ffmpeg_path), '-v', 'error', '-nostdin', '-y', '-i',
+      str(srt_path), '-c', 'copy', '-f', 'matroska'
+  ]
+  for key, value in (('language', language), ('title', title)):
+    if value:
+      cmd += ['-metadata:s:s:0', f'{key}={value}']
+  cmd.append(str(output_path))
+  with tempfile.TemporaryFile() as stderr:
+    proc = subprocess.run(cmd, stderr=stderr, check=False)
+    _Check(proc.returncode, stderr, 'ffmpeg subtitle wrapping')
+
+
 def Mux(ffmpeg_path: pathlib.PurePath,
         base: pathlib.PurePath,
-        extra_audio: List[pathlib.PurePath],
+        extra_inputs: List[pathlib.PurePath],
         output_path: pathlib.PurePath,
         offset_s: float = 0.0) -> None:
-  """Copies every stream of `base` and appends the audio of each file in
-  `extra_audio` (delayed by `offset_s`), without re-encoding."""
+  """Copies every stream of `base` and appends all streams of each file in
+  `extra_inputs` (delayed by `offset_s`), without re-encoding."""
   cmd = [str(ffmpeg_path), '-v', 'error', '-nostdin', '-y', '-i', str(base)]
-  for path in extra_audio:
+  for path in extra_inputs:
     cmd += ['-itsoffset', f'{offset_s:.6f}', '-i', str(path)]
   cmd += ['-map', '0']
-  for n in range(len(extra_audio)):
-    cmd += ['-map', f'{n + 1}:a']
+  for n in range(len(extra_inputs)):
+    cmd += ['-map', str(n + 1)]
   cmd += ['-c', 'copy', str(output_path)]
   with tempfile.TemporaryFile() as stderr:
     proc = subprocess.run(cmd, stderr=stderr, check=False)

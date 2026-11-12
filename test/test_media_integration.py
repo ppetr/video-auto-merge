@@ -86,3 +86,40 @@ def test_encode_and_mux_adds_audio_stream(delayed_audio_video, tmp_path):
   streams = media.ProbeAudioStreams('ffprobe', merged)
   assert [s.language for s in streams] == ['ces', 'slk']
   assert all(s.codec == 'opus' for s in streams)
+
+
+@pytest.fixture(name='subtitled_video')
+def _subtitled_video(tmp_path):
+  srt = tmp_path / 'in.srt'
+  srt.write_text('1\n00:00:00,500 --> 00:00:01,500\nHello\n\n')
+  path = tmp_path / 'subtitled.mkv'
+  _ffmpeg('-f', 'lavfi', '-i', 'testsrc=size=160x120:rate=25:duration=2', '-i',
+          str(srt), '-c:v', 'libx264', '-c:s', 'srt', '-metadata:s:s:0',
+          'language=eng', str(path))
+  return path
+
+
+def test_probe_subtitle_streams(subtitled_video):
+  streams = media.ProbeSubtitleStreams('ffprobe', subtitled_video)
+  assert len(streams) == 1
+  assert streams[0].is_text
+  assert streams[0].language == 'eng'
+
+
+def test_extract_srt_returns_cues(subtitled_video):
+  text = media.ExtractSrt('ffmpeg', subtitled_video, 1)
+  assert '00:00:00,500 --> 00:00:01,500' in text
+  assert 'Hello' in text
+
+
+def test_wrapped_subtitle_track_is_muxed_with_metadata(subtitled_video,
+                                                       tmp_path):
+  srt = tmp_path / 'new.srt'
+  srt.write_text('1\n00:00:00,100 --> 00:00:00,900\nAhoj\n\n')
+  track = tmp_path / 'new.mks'
+  media.WriteSubtitleTrack('ffmpeg', srt, track, language='ces')
+  merged = tmp_path / 'merged.mkv'
+  media.Mux('ffmpeg', subtitled_video, [track], merged)
+
+  streams = media.ProbeSubtitleStreams('ffprobe', merged)
+  assert [s.language for s in streams] == ['eng', 'ces']
