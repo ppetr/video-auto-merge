@@ -42,9 +42,9 @@ command-line tool yet - `AlignFrames` is a library function, not a script.
 
 | Component | State |
 |---|---|
-| Frame-level DP alignment ([`AlignFrames`](src/frame_dp_align.py)) | Implemented; validated against brute-force references on synthetic data |
+| Frame-level DP alignment ([`AlignFrames`](src/video_auto_merge/frame_dp_align.py)) | Implemented; validated against brute-force references on synthetic data |
 | GPU/streaming path for whole-film-length inputs | Implemented; correctness tests only, no large-scale stress test |
-| Descriptor extraction (ffmpeg `signature` filter, caching) | Implemented ([`signatures.py`](src/signatures.py)); library only |
+| Descriptor extraction (ffmpeg `signature` filter, caching) | Implemented ([`signatures.py`](src/video_auto_merge/signatures.py)); library only |
 | Alignment path to segment list (matched / unmatched spans, timestamps) | Not implemented |
 | Cutting and joining audio/video with ffmpeg | Not implemented |
 | Subtitles for spans without matching audio | Not implemented (planned, optional) |
@@ -59,7 +59,7 @@ yet been re-run against real data in this repository.
 
 - `jax` (CPU-only works for correctness; a CUDA-enabled `jaxlib` is
   needed for whole-film-scale performance - see the module docstring of
-  [`src/frame_dp_align.py`](src/frame_dp_align.py) for the cost model and `FrameDpParams` for the
+  [`src/video_auto_merge/frame_dp_align.py`](src/video_auto_merge/frame_dp_align.py) for the cost model and `FrameDpParams` for the
   tunable parameters).
 
 ## Testing

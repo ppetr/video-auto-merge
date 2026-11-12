@@ -1,6 +1,6 @@
 # Design notes: frame-level DP alignment
 
-Background for `src/frame_dp_align.py`, a frame-resolution alternative to
+Background for `src/video_auto_merge/frame_dp_align.py`, a frame-resolution alternative to
 an earlier, simpler 1-second-block banded alignment. This document
 summarizes, in general terms, what was tried while developing it and what
 the outcome was - so a future reader knows which direction already turned

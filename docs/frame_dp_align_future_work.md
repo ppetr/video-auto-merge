@@ -1,6 +1,6 @@
 # Future work: frame-level DP alignment
 
-Ideas deliberately not included in `src/frame_dp_align.py`, and why. See
+Ideas deliberately not included in `src/video_auto_merge/frame_dp_align.py`, and why. See
 `frame_dp_align_notes.md` for the approaches that *are* included and how
 they were validated.
 

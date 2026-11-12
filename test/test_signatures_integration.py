@@ -18,7 +18,7 @@ import shutil
 
 import pytest
 
-import signatures
+from video_auto_merge import signatures
 
 pytestmark = pytest.mark.skipif(not shutil.which('ffmpeg'),
                                 reason='ffmpeg not on PATH')

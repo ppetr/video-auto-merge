@@ -18,7 +18,7 @@ import dataclasses
 import numpy as np
 import pytest
 
-import report
+from video_auto_merge import report
 
 
 @dataclasses.dataclass

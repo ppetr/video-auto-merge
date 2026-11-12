@@ -28,7 +28,7 @@ jax = pytest.importorskip('jax')  # frame_dp_align imports jax at module
 # tests above) needs it to even import the module - skip together
 # rather than trying to make the CPU tests independently importable.
 
-import frame_dp_align  # noqa: E402  pylint: disable=wrong-import-position
+from video_auto_merge import frame_dp_align  # noqa: E402  pylint: disable=wrong-import-position
 
 _NDIM = 12  # small, like the real MPEG-7 signature's ternary descriptor.
 
@@ -38,8 +38,8 @@ def _random_signatures(rng, n, ndim=_NDIM):
 
 
 def _l1_cost(left_sig, right_sig):
-  return np.abs(left_sig[:, None, :] - right_sig[None, :, :]).sum(
-      axis=-1).astype(np.float64)
+  return np.abs(left_sig[:, None, :] -
+                right_sig[None, :, :]).sum(axis=-1).astype(np.float64)
 
 
 @pytest.mark.parametrize('c0,c1', [(5.0, 1.0), (20.0, 3.0), (1.0, 0.5)])
@@ -173,8 +173,7 @@ def test_align_frames_finds_a_right_side_insert():
   extra = _random_signatures(rng, 15)
   right_sig = np.concatenate([left_sig[:10], extra, left_sig[10:]])
 
-  params = frame_dp_align.FrameDpParams(c0=5.0, c1=0.1, base_size=4,
-                                        chunk=3)
+  params = frame_dp_align.FrameDpParams(c0=5.0, c1=0.1, base_size=4, chunk=3)
   result = frame_dp_align.AlignFrames(left_sig, right_sig, params)
 
   assert result.unique == [frame_dp_align.UniqueBlock('right', 10, 25)]

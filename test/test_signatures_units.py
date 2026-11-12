@@ -18,7 +18,7 @@ import os
 
 import numpy as np
 
-import signatures
+from video_auto_merge import signatures
 
 
 class TestLoadSignatures:
