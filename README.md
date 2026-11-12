@@ -22,7 +22,8 @@ The intended pipeline, end to end:
 5. Optionally fill the gaps that have no audio with subtitles.
 6. Write out the complete result.
 
-Only steps 1 and 2 are implemented so far - see [Status](#status).
+Steps 1-4 are implemented for audio, the rest is not yet - see
+[Status](#status).
 
 Split out of [avtools](https://github.com/ppetr/avtools) into its own
 project: the GPU/JAX dependency and the dynamic-programming/divide-and-conquer
@@ -37,23 +38,23 @@ for ideas deliberately deferred.
 
 ## Status
 
-Early stage (pre-alpha). Only the alignment core exists; there is no
-command-line tool yet - `AlignFrames` is a library function, not a script.
+Early stage (pre-alpha). Alignment and attaching the right video's audio
+to the left video work; subtitles and the other planned features do not
+exist yet.
 
 | Component | State |
 |---|---|
 | Frame-level DP alignment ([`AlignFrames`](src/video_auto_merge/frame_dp_align.py)) | Implemented; validated against brute-force references on synthetic data |
 | GPU/streaming path for whole-film-length inputs | Implemented; correctness tests only, no large-scale stress test |
-| Descriptor extraction (ffmpeg `signature` filter, caching) | Implemented ([`signatures.py`](src/video_auto_merge/signatures.py)); library only |
-| Alignment path to segment list (matched / unmatched spans, timestamps) | Not implemented |
-| Cutting and joining audio/video with ffmpeg | Not implemented |
+| Descriptor extraction (ffmpeg `signature` filter, caching) | Implemented ([`signatures.py`](src/video_auto_merge/signatures.py)) |
+| Alignment path to segment list (matched / unmatched spans, timestamps) | Implemented ([`report.py`](src/video_auto_merge/report.py) table, [`plan.py`](src/video_auto_merge/plan.py) segment plan) |
+| Cutting and joining audio with ffmpeg | Implemented for audio ([`merge.py`](src/video_auto_merge/merge.py)): right audio onto the left video, crossfaded cuts, gaps from a fall-back track; see [design notes](docs/merge_design.md) |
 | Subtitles for spans without matching audio | Not implemented (planned, optional) |
 | Constant-speed drift compensation (e.g. PAL/NTSC) | Not implemented (deferred, see [future work](docs/frame_dp_align_future_work.md)) |
-| Command-line interface | `video-auto-merge align` only (see [Usage](#usage)) |
+| Command-line interface | `align` and `merge` (see [Usage](#usage)) |
 
-The alignment algorithm itself was validated on a real pair of
-differently-cut film releases in a prototype of this code; it has not
-yet been re-run against real data in this repository.
+The alignment algorithm was validated on a real pair of differently-cut
+film releases, in a prototype and again with the `align` command.
 
 ## Usage
 
@@ -67,13 +68,26 @@ the block's start in that film). `--all` lists matched blocks too, `-o`
 writes the table to a file. Per-frame signatures are slow to compute (they
 use ffmpeg, with `-hwaccel cuda` decoding by default; `--hwaccel none`
 turns it off), so they are cached in `--cache-dir` and reused on later
-runs. The alignment itself needs a GPU for whole-film inputs (see
-Requirements); `--c0`/`--c1` set the cost of a jump over frames present
-in only one video.
+runs, and so is the alignment itself. The alignment needs a GPU for
+whole-film inputs (see Requirements); `--c0`/`--c1` set the cost of a jump
+over frames present in only one video.
+
+```
+video-auto-merge merge film-L.mkv film-R.mkv merged.mkv --cache-dir signatures/
+```
+
+Writes the left video with all its streams unchanged plus the audio of the
+right video, cut to fit the left timeline (Opus, with the right track's
+language and title). Parts of the left video missing from the right one are
+filled from the left video's first audio stream (`--fallback INDEX` picks
+another), parts only in the right video are dropped, every cut is
+crossfaded (`--crossfade-ms`). `--right-audio INDEX` (repeatable) selects
+which right audio streams to attach. Design and open items:
+[docs/merge_design.md](docs/merge_design.md).
 
 ## Requirements
 
-- `ffmpeg` in `$PATH`, for the per-frame signatures.
+- `ffmpeg` (with `libopus`) and `ffprobe` in `$PATH`.
 - `jax` (CPU-only works for correctness; a CUDA-enabled `jaxlib` is
   needed for whole-film-scale performance - see the module docstring of
   [`src/video_auto_merge/frame_dp_align.py`](src/video_auto_merge/frame_dp_align.py) for the cost model and `FrameDpParams` for the
