@@ -86,9 +86,10 @@ def _BuildParser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> int:
   """Runs the command-line tool; returns the process exit code."""
   args = _BuildParser().parse_args(argv)
-  logging.basicConfig(level=logging.INFO,
+  logging.basicConfig(level=logging.WARNING,
                       format='%(asctime)s %(message)s',
                       stream=sys.stderr)
+  logging.getLogger('video_auto_merge').setLevel(logging.INFO)
   pre_input_args = ([] if args.hwaccel == _NO_HWACCEL else
                     ['-hwaccel', args.hwaccel])
   alignment = align.AlignVideos(args.left,

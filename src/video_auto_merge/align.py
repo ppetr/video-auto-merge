@@ -31,6 +31,8 @@ import numpy.typing as npt
 from video_auto_merge import frame_dp_align
 from video_auto_merge import signatures
 
+_LOG = logging.getLogger(__name__)
+
 DEFAULT_PRE_INPUT_ARGS = ('-hwaccel', 'cuda')
 
 
@@ -77,7 +79,7 @@ def AlignVideos(
                         pathlib.Path(cache_dir), list(pre_input_args)))
   left_times, left_sigs, _ = signatures.LoadSignatures(left_xml)
   right_times, right_sigs, _ = signatures.LoadSignatures(right_xml)
-  logging.info('Aligning %d x %d frames (can take a long time on a GPU)',
-               len(left_times), len(right_times))
+  _LOG.info('Aligning %d x %d frames (can take a long time on a GPU)',
+            len(left_times), len(right_times))
   result = frame_dp_align.AlignFrames(left_sigs, right_sigs, params)
   return VideoAlignment(np.asarray(left_times), np.asarray(right_times), result)

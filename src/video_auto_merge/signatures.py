@@ -41,6 +41,8 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import numpy.typing as npt
 
+_LOG = logging.getLogger(__name__)
+
 SIGNATURE_LEN = 380
 
 _SIGNATURE_NS = '{urn:mpeg:mpeg7:schema:2001}'
@@ -88,7 +90,7 @@ async def GenerateSignature(
         '-vf', f'settb=1/1000,signature=format=xml:filename={tmp_path}', '-f',
         'null', '-'
     ]
-    logging.info('Running command: %s', ' '.join(map(shlex.quote, cmd)))
+    _LOG.info('Running command: %s', ' '.join(map(shlex.quote, cmd)))
     process = await asyncio.create_subprocess_exec(*cmd,
                                                    stdin=subprocess.DEVNULL)
     await process.wait()
@@ -172,9 +174,9 @@ async def EnsureSignature(
   as `input_path` (Make-style staleness check)."""
   if xml_path.exists():
     if xml_path.stat().st_mtime >= pathlib.Path(input_path).stat().st_mtime:
-      logging.info('Reusing cached signature %s', xml_path)
+      _LOG.info('Reusing cached signature %s', xml_path)
       return
-    logging.info('%s is older than %s - regenerating', xml_path, input_path)
+    _LOG.info('%s is older than %s - regenerating', xml_path, input_path)
   await GenerateSignature(ffmpeg_path,
                           input_path,
                           xml_path,

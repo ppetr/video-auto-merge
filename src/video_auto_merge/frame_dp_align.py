@@ -166,7 +166,7 @@ def CrossingCost(cost_to, cost_from, c0, c1, i_mid):
 
   if i_mid > 0:
     shifted = (cost_to[:i_mid, :] -
-              c1 * np.arange(i_mid, dtype=np.float64)[:, None])
+               c1 * np.arange(i_mid, dtype=np.float64)[:, None])
     col_min_shifted = shifted.min(axis=0)
   else:
     col_min_shifted = np.full(mp1, np.inf)
@@ -218,8 +218,8 @@ def _BruteForceBacktrack(cost_matrix, c0, c1, i_offset, j_offset):
   i, j = n, m
   while (i, j) != (0, 0):
     move, pi, pj = back[i][j]
-    path.append((move, pi + i_offset, pj + j_offset, i + i_offset,
-                j + j_offset))
+    path.append(
+        (move, pi + i_offset, pj + j_offset, i + i_offset, j + j_offset))
     i, j = pi, pj
   path.reverse()
   return path
@@ -236,14 +236,14 @@ def Backtrack(cost_matrix, c0, c1, base_size=40):
   the full matrices and the log factor at whole-film scale."""
   _CheckDpParams(c0, c1)
   return _BacktrackRange(cost_matrix, c0, c1, 0, cost_matrix.shape[0], 0,
-                        cost_matrix.shape[1], base_size)
+                         cost_matrix.shape[1], base_size)
 
 
 def _BacktrackRange(cost_matrix, c0, c1, i_lo, i_hi, j_lo, j_hi, base_size):
   n_sub, m_sub = i_hi - i_lo, j_hi - j_lo
   if n_sub <= base_size or m_sub <= base_size:
-    return _BruteForceBacktrack(cost_matrix[i_lo:i_hi, j_lo:j_hi], c0, c1,
-                                i_lo, j_lo)
+    return _BruteForceBacktrack(cost_matrix[i_lo:i_hi, j_lo:j_hi], c0, c1, i_lo,
+                                j_lo)
 
   i_mid_local = n_sub // 2
   sub_cost = cost_matrix[i_lo:i_hi, j_lo:j_hi]
@@ -278,7 +278,7 @@ def _BacktrackRange(cost_matrix, c0, c1, i_lo, i_hi, j_lo, j_hi, base_size):
   i_dest = i_lo + i_dest_local
 
   left = _BacktrackRange(cost_matrix, c0, c1, i_lo, i_source, j_lo, j_star,
-                        base_size)
+                         base_size)
   jump_segment = [('ijump', i_source, j_star, i_dest, j_star)]
   right = _BacktrackRange(cost_matrix, c0, c1, i_dest, i_hi, j_star, j_hi,
                           base_size)
@@ -386,8 +386,8 @@ def _MakeRunChunk():
       new_src = jnp.where(improved, i, src)
       return (f_cur, new_cms, new_src, i + 1.0), None
 
-    (f_final, cms_final, src_final, i_final), _ = jax.lax.scan(
-        Step, (f, cms, src, i0), d_chunk)
+    (f_final, cms_final, src_final,
+     i_final), _ = jax.lax.scan(Step, (f, cms, src, i0), d_chunk)
     return f_final, cms_final, src_final, i_final
 
   return RunChunk
@@ -456,12 +456,18 @@ def ForwardCheckpoint(left_onehot, right_cost, c0, c1, i_mid, chunk=300):
   `0..i_mid-1`) and its source row - the forward half of what the
   Hirschberg split at `i_mid` needs, without materializing the full
   matrix."""
-  f, cms_before, src_before, _, _ = _ChunkedSweep(left_onehot, right_cost,
-                                                  c0, c1, i_mid, chunk)
+  f, cms_before, src_before, _, _ = _ChunkedSweep(left_onehot, right_cost, c0,
+                                                  c1, i_mid, chunk)
   return np.array(f), np.array(cms_before), np.array(src_before)
 
 
-def BackwardCheckpoint(left_onehot_rev, right_cost_rev, c0, c1, n, m, i_mid,
+def BackwardCheckpoint(left_onehot_rev,
+                       right_cost_rev,
+                       c0,
+                       c1,
+                       n,
+                       m,
+                       i_mid,
                        chunk=300):
   """`cost_from(i_mid,:)`, `bcredit_shifted(i_mid,:) = min_{i''>=i_mid}
   [cost_from(i'',j)+c1*i'']` and its source row (in *original*
@@ -492,8 +498,8 @@ def BackwardCheckpoint(left_onehot_rev, right_cost_rev, c0, c1, n, m, i_mid,
   # (n_total, m_total) pair at the call site - not needed internally.
   k = n - i_mid
   f_rev, _, _, cms_after, src_after = _ChunkedSweep(left_onehot_rev,
-                                                    right_cost_rev, c0, c1,
-                                                    k, chunk)
+                                                    right_cost_rev, c0, c1, k,
+                                                    chunk)
   cost_from_mid = np.array(f_rev)[::-1]
   bcredit_shifted = np.array(cms_after)[::-1] + c1 * n
   i_dest = n - np.array(src_after)[::-1]
@@ -534,8 +540,7 @@ def StreamingBacktrack(left_onehot,
   i_mid = i_lo + i_mid_local
 
   cost_to_mid, cms_before, src_before = ForwardCheckpoint(
-      left_onehot[i_lo:i_hi], right_cost[j_lo:j_hi], c0, c1, i_mid_local,
-      chunk)
+      left_onehot[i_lo:i_hi], right_cost[j_lo:j_hi], c0, c1, i_mid_local, chunk)
   # Reversed sub-range of [i_lo,i_hi)/[j_lo,j_hi) within the full
   # reversed arrays.
   left_rev_sub = left_onehot_rev[n_total - i_hi:n_total - i_lo]
@@ -556,11 +561,11 @@ def StreamingBacktrack(left_onehot,
   if node_cost[j_star_local] <= in_flight_cost[j_star_local]:
     SPLIT_STATS['node'] += 1
     left = StreamingBacktrack(left_onehot, right_cost, left_onehot_rev,
-                              right_cost_rev, c0, c1, n_total, m_total,
-                              i_lo, i_mid, j_lo, j_star, base_size, chunk)
+                              right_cost_rev, c0, c1, n_total, m_total, i_lo,
+                              i_mid, j_lo, j_star, base_size, chunk)
     right = StreamingBacktrack(left_onehot, right_cost, left_onehot_rev,
-                               right_cost_rev, c0, c1, n_total, m_total,
-                               i_mid, i_hi, j_star, j_hi, base_size, chunk)
+                               right_cost_rev, c0, c1, n_total, m_total, i_mid,
+                               i_hi, j_star, j_hi, base_size, chunk)
     return left + right
 
   SPLIT_STATS['in_flight'] += 1
@@ -577,8 +582,8 @@ def StreamingBacktrack(left_onehot,
                             i_source, j_lo, j_star, base_size, chunk)
   jump_segment = [('ijump', i_source, j_star, i_dest, j_star)]
   right = StreamingBacktrack(left_onehot, right_cost, left_onehot_rev,
-                             right_cost_rev, c0, c1, n_total, m_total,
-                             i_dest, i_hi, j_star, j_hi, base_size, chunk)
+                             right_cost_rev, c0, c1, n_total, m_total, i_dest,
+                             i_hi, j_star, j_hi, base_size, chunk)
   return left + jump_segment + right
 
 
@@ -659,8 +664,8 @@ class FrameAlignmentResult:
   unique: List[UniqueBlock]
 
 
-def _PathToResult(path: List[Tuple[str, int, int, int, int]]
-                  ) -> FrameAlignmentResult:
+def _PathToResult(
+    path: List[Tuple[str, int, int, int, int]]) -> FrameAlignmentResult:
   """Collapses a raw `(move, i0, j0, i1, j1)` segment list (one match
   edge per segment, one segment per jump) into merged blocks, in
   frame-index rather than time terms."""
@@ -683,9 +688,11 @@ def _PathToResult(path: List[Tuple[str, int, int, int, int]]
   return FrameAlignmentResult(aligned=aligned, unique=unique)
 
 
-def AlignFrames(left_signatures: npt.ArrayLike,
-               right_signatures: npt.ArrayLike,
-               params: FrameDpParams = FrameDpParams()) -> FrameAlignmentResult:
+def AlignFrames(
+    left_signatures: npt.ArrayLike,
+    right_signatures: npt.ArrayLike,
+    params: FrameDpParams = FrameDpParams()
+) -> FrameAlignmentResult:
   """Aligns two per-frame descriptor sequences (e.g. MPEG-7 `signature`
   filter output, one row per frame, ternary {0,1,2} values) at frame
   resolution, returning which stretches matched and which are unique to
@@ -707,6 +714,6 @@ def AlignFrames(left_signatures: npt.ArrayLike,
   right_cost_rev = CostTransform(right_sig[::-1])
 
   path = StreamingBacktrack(left_onehot, right_cost, left_onehot_rev,
-                            right_cost_rev, params.c0, params.c1, n, m, 0,
-                            n, 0, m, params.base_size, params.chunk)
+                            right_cost_rev, params.c0, params.c1, n, m, 0, n, 0,
+                            m, params.base_size, params.chunk)
   return _PathToResult(path)
