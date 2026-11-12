@@ -14,7 +14,6 @@
 """End-to-end test of `AlignVideos` with real ffmpeg and jax."""
 
 import shutil
-import subprocess
 
 import pytest
 
@@ -26,42 +25,10 @@ from video_auto_merge import frame_dp_align  # noqa: E402  pylint: disable=wrong
 pytestmark = pytest.mark.skipif(not shutil.which('ffmpeg'),
                                 reason='ffmpeg not on PATH')
 
-_FPS = 25
-_SEGMENT_SECONDS = 3
 
-
-def _segment(tmp_path, source):
-  path = tmp_path / f'{source}.mkv'
-  subprocess.run([
-      'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i',
-      f'{source}=size=160x120:rate={_FPS}', '-t',
-      str(_SEGMENT_SECONDS), '-c:v', 'libx264', '-g', '1',
-      str(path)
-  ],
-                 check=True)
-  return path
-
-
-def _concat(tmp_path, name, segments):
-  listing = tmp_path / f'{name}.txt'
-  listing.write_text(''.join(f"file '{s}'\n" for s in segments))
-  path = tmp_path / f'{name}.mkv'
-  subprocess.run([
-      'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-f', 'concat',
-      '-safe', '0', '-i',
-      str(listing), '-c', 'copy',
-      str(path)
-  ],
-                 check=True)
-  return path
-
-
-def test_detects_a_segment_present_only_in_the_right_video(tmp_path):
-  first = _segment(tmp_path, 'testsrc')
-  extra = _segment(tmp_path, 'rgbtestsrc')
-  last = _segment(tmp_path, 'mandelbrot')
-  left = _concat(tmp_path, 'left', [first, last])
-  right = _concat(tmp_path, 'right', [first, extra, last])
+def test_detects_a_segment_present_only_in_the_right_video(
+    tmp_path, inserted_segment_videos):
+  left, right = inserted_segment_videos.paths
 
   alignment = align.AlignVideos(left,
                                 right,
@@ -69,11 +36,11 @@ def test_detects_a_segment_present_only_in_the_right_video(tmp_path):
                                 frame_dp_align.FrameDpParams(c0=500.0, c1=50.0),
                                 pre_input_args=[])
 
-  assert len(alignment.left_times) == _FPS * 2 * _SEGMENT_SECONDS
-  assert len(alignment.right_times) == _FPS * 3 * _SEGMENT_SECONDS
+  fps = inserted_segment_videos.fps
+  seconds = inserted_segment_videos.segment_seconds
+  assert len(alignment.left_times) == fps * 2 * seconds
+  assert len(alignment.right_times) == fps * 3 * seconds
   unique = alignment.result.unique
   assert [u.side for u in unique] == ['right']
-  assert unique[0].end - unique[0].start == pytest.approx(_FPS *
-                                                          _SEGMENT_SECONDS,
-                                                          abs=3)
-  assert unique[0].start == pytest.approx(_FPS * _SEGMENT_SECONDS, abs=3)
+  assert unique[0].end - unique[0].start == pytest.approx(fps * seconds, abs=3)
+  assert unique[0].start == pytest.approx(fps * seconds, abs=3)

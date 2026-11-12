@@ -35,6 +35,9 @@ classifiers= [
     "Operating System :: POSIX",
 ]
 
+[project.scripts]
+video-auto-merge = "video_auto_merge.cli:main"
+
 [project.optional-dependencies]
 test = ["pytest"]
 

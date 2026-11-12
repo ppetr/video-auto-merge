@@ -14,8 +14,10 @@
 """Shared fixtures. Files are written under the per-test ``tmp_path``, so the
 suite is safe to run in parallel."""
 
+import dataclasses
 import shutil
 import subprocess
+from typing import Tuple
 
 import pytest
 
@@ -41,3 +43,50 @@ def make_video(tmp_path):
     return path
 
   return _make
+
+
+@dataclasses.dataclass
+class InsertedSegmentVideos:
+  """Two synthetic videos: `paths[1]` is `paths[0]` with an extra,
+  visually distinct segment of `segment_seconds` inserted in the middle."""
+  paths: Tuple
+  fps: int
+  segment_seconds: int
+
+
+@pytest.fixture
+def inserted_segment_videos(tmp_path):
+  """Builds left = A + C and right = A + B + C from three distinct
+  synthetic sources, so that B is present only in the right video."""
+  fps = 25
+  segment_seconds = 3
+
+  def segment(source):
+    path = tmp_path / f'{source}.mkv'
+    subprocess.run([
+        FFMPEG, '-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i',
+        f'{source}=size=160x120:rate={fps}', '-t',
+        str(segment_seconds), '-c:v', 'libx264', '-g', '1',
+        str(path)
+    ],
+                   check=True)
+    return path
+
+  def concat(name, segments):
+    listing = tmp_path / f'{name}.txt'
+    listing.write_text(''.join(f"file '{s}'\n" for s in segments))
+    path = tmp_path / f'{name}.mkv'
+    subprocess.run([
+        FFMPEG, '-hide_banner', '-loglevel', 'error', '-y', '-f', 'concat',
+        '-safe', '0', '-i',
+        str(listing), '-c', 'copy',
+        str(path)
+    ],
+                   check=True)
+    return path
+
+  first, extra, last = (
+      segment(s) for s in ('testsrc', 'rgbtestsrc', 'mandelbrot'))
+  return InsertedSegmentVideos(
+      (concat('left', [first, last]), concat('right', [first, extra, last])),
+      fps, segment_seconds)
