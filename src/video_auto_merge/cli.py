@@ -90,13 +90,13 @@ def _BuildParser() -> argparse.ArgumentParser:
 
   merge_parser = commands.add_parser(
       'merge',
-      help='attach the right video\'s audio to the left video',
+      help='attach the right video\'s audio and subtitles to the left video',
       description='Aligns the two videos, then writes the left video with '
-      'all its streams unchanged plus the audio of the right video, cut '
-      'to fit the left timeline: parts missing from the right video are '
-      'filled from a fall-back audio stream of the left video, parts '
-      'present only in the right video are dropped. Every cut is '
-      'crossfaded.')
+      'all its streams unchanged plus the audio and text subtitles of the '
+      'right video, cut to fit the left timeline: parts missing from the '
+      'right video are filled from a fall-back audio stream of the left '
+      'video, parts present only in the right video are dropped. Every '
+      'audio cut is crossfaded.')
   _AddAlignmentArguments(merge_parser)
   merge_parser.add_argument('output', type=pathlib.Path, help='output file')
   merge_parser.add_argument(
@@ -106,6 +106,16 @@ def _BuildParser() -> argparse.ArgumentParser:
       metavar='INDEX',
       help='stream index of a right audio stream to attach (repeatable; '
       'default: all)')
+  merge_parser.add_argument(
+      '--right-subtitles',
+      type=int,
+      action='append',
+      metavar='INDEX',
+      help='stream index of a right text subtitle stream to attach '
+      '(repeatable; default: all text subtitles)')
+  merge_parser.add_argument('--no-subtitles',
+                            action='store_true',
+                            help='do not attach any subtitles')
   merge_parser.add_argument(
       '--fallback',
       type=int,
@@ -146,16 +156,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                                 ffmpeg_path=args.ffmpeg,
                                 pre_input_args=pre_input_args)
   if args.command == 'merge':
-    merge.MergeAudio(args.left,
-                     args.right,
-                     alignment,
-                     args.output,
-                     right_streams=args.right_audio,
-                     fallback_stream=args.fallback,
-                     crossfade_s=args.crossfade_ms / 1000,
-                     min_match_s=args.min_match,
-                     ffmpeg_path=args.ffmpeg,
-                     ffprobe_path=args.ffprobe)
+    merge.Merge(
+        args.left,
+        args.right,
+        alignment,
+        args.output,
+        right_audio=args.right_audio,
+        right_subtitles=([] if args.no_subtitles else args.right_subtitles),
+        fallback_stream=args.fallback,
+        crossfade_s=args.crossfade_ms / 1000,
+        min_match_s=args.min_match,
+        ffmpeg_path=args.ffmpeg,
+        ffprobe_path=args.ffprobe)
     return 0
   table = report.FormatTable(report.OrderedBlocks(alignment.result),
                              alignment.left_times,

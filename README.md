@@ -22,7 +22,7 @@ The intended pipeline, end to end:
 5. Optionally fill the gaps that have no audio with subtitles.
 6. Write out the complete result.
 
-Steps 1-4 are implemented for audio, the rest is not yet - see
+Steps 1-4 are implemented for audio and text subtitles, the rest is not yet - see
 [Status](#status).
 
 Split out of [avtools](https://github.com/ppetr/avtools) into its own
@@ -48,8 +48,8 @@ exist yet.
 | GPU/streaming path for whole-film-length inputs | Implemented; correctness tests only, no large-scale stress test |
 | Descriptor extraction (ffmpeg `signature` filter, caching) | Implemented ([`signatures.py`](src/video_auto_merge/signatures.py)) |
 | Alignment path to segment list (matched / unmatched spans, timestamps) | Implemented ([`report.py`](src/video_auto_merge/report.py) table, [`plan.py`](src/video_auto_merge/plan.py) segment plan) |
-| Cutting and joining audio with ffmpeg | Implemented for audio ([`merge.py`](src/video_auto_merge/merge.py)): right audio onto the left video, crossfaded cuts, gaps from a fall-back track; see [design notes](docs/merge_design.md) |
-| Subtitles for spans without matching audio | Not implemented (planned, optional) |
+| Cutting and joining audio with ffmpeg | Implemented for audio and text subtitles ([`merge.py`](src/video_auto_merge/merge.py)): right streams onto the left video, crossfaded audio cuts, gaps from a fall-back track; see [design notes](docs/merge_design.md) |
+| Subtitles for spans without matching audio | Not implemented (planned, optional); re-timing the right video's own text subtitles works |
 | Constant-speed drift compensation (e.g. PAL/NTSC) | Not implemented (deferred, see [future work](docs/frame_dp_align_future_work.md)) |
 | Command-line interface | `align` and `merge` (see [Usage](#usage)) |
 
@@ -76,13 +76,15 @@ over frames present in only one video.
 video-auto-merge merge film-L.mkv film-R.mkv merged.mkv --cache-dir signatures/
 ```
 
-Writes the left video with all its streams unchanged plus the audio of the
-right video, cut to fit the left timeline (Opus, with the right track's
-language and title). Parts of the left video missing from the right one are
-filled from the left video's first audio stream (`--fallback INDEX` picks
-another), parts only in the right video are dropped, every cut is
-crossfaded (`--crossfade-ms`). `--right-audio INDEX` (repeatable) selects
-which right audio streams to attach. Design and open items:
+Writes the left video with all its streams unchanged plus the audio and
+text subtitles of the right video, cut to fit the left timeline (audio as
+Opus; tracks keep their language and title). Parts of the left video
+missing from the right one are filled from the left video's first audio
+stream (`--fallback INDEX` picks another), parts only in the right video
+are dropped, every audio cut is crossfaded (`--crossfade-ms`).
+`--right-audio INDEX` (repeatable) selects which right audio streams to
+attach, `--right-subtitles INDEX` and `--no-subtitles` do the same for
+subtitles (image-based ones are skipped). Design and open items:
 [docs/merge_design.md](docs/merge_design.md).
 
 ## Requirements

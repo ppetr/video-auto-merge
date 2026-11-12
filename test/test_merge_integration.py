@@ -26,6 +26,7 @@ from video_auto_merge import align
 from video_auto_merge import frame_dp_align
 from video_auto_merge import media
 from video_auto_merge import merge
+from video_auto_merge import subtitles
 
 pytestmark = pytest.mark.skipif(not shutil.which('ffmpeg'),
                                 reason='ffmpeg not on PATH')
@@ -54,14 +55,23 @@ def _videos(tmp_path):
           '-f', 'lavfi', '-i', f'sine=frequency=220:sample_rate={RATE}', '-t',
           '4', '-ac', '2', '-c:v', 'libx264', '-c:a', 'libopus', str(left))
   right = tmp_path / 'right.mkv'
+  srt = tmp_path / 'right.srt'
+  srt.write_text(
+      subtitles.FormatSrt([
+          subtitles.Cue(0.5, 1.0, 'kept'),
+          subtitles.Cue(2.0, 3.0, 'dropped'),
+          subtitles.Cue(4.0, 4.5, 'moved'),
+      ]))
   parts = [(880, 1.6), (1320, 2.0), (1760, 1.6), (2200, 0.8)]
   graph = ';'.join(f'sine=frequency={f}:sample_rate={RATE}:duration={d}[a{n}]'
                    for n, (f, d) in enumerate(parts))
   graph += ';' + ''.join(f'[a{n}]' for n in range(len(parts)))
   graph += f'concat=n={len(parts)}:v=0:a=1[out]'
-  _ffmpeg('-f', 'lavfi', '-i', f'testsrc=size=160x120:rate={FPS}:duration=6',
-          '-filter_complex', graph, '-map', '0:v', '-map', '[out]', '-c:v',
-          'libx264', '-c:a', 'libopus', '-metadata:s:a:0', 'language=slk',
+  _ffmpeg('-f',
+          'lavfi', '-i', f'testsrc=size=160x120:rate={FPS}:duration=6', '-i',
+          str(srt), '-filter_complex', graph, '-map', '0:v', '-map', '[out]',
+          '-map', '1', '-c:v', 'libx264', '-c:a', 'libopus', '-c:s', 'srt',
+          '-metadata:s:a:0', 'language=slk', '-metadata:s:s:0', 'language=slk',
           str(right))
   return left, right
 
@@ -85,12 +95,12 @@ def _alignment():
       np.arange(150) / FPS, result)
 
 
-def test_merge_audio_places_right_audio_and_fills_the_gap(
-    videos, alignment, tmp_path):
+def test_merge_places_right_audio_and_fills_the_gap(videos, alignment,
+                                                    tmp_path):
   left, right = videos
   output = tmp_path / 'merged.mkv'
 
-  merge.MergeAudio(left, right, alignment, output)
+  merge.Merge(left, right, alignment, output)
 
   streams = media.ProbeAudioStreams('ffprobe', output)
   assert [s.language for s in streams] == [None, 'slk']
@@ -105,11 +115,32 @@ def test_merge_audio_places_right_audio_and_fills_the_gap(
     assert _dominant_hz(pcm, start, end) == pytest.approx(hz, abs=40)
 
 
-def test_merge_audio_rejects_unknown_right_stream(videos, alignment, tmp_path):
+def test_merge_rejects_unknown_right_stream(videos, alignment, tmp_path):
   left, right = videos
   with pytest.raises(ValueError, match='no audio streams'):
-    merge.MergeAudio(left,
-                     right,
-                     alignment,
-                     tmp_path / 'out.mkv',
-                     right_streams=[7])
+    merge.Merge(left, right, alignment, tmp_path / 'out.mkv', right_audio=[7])
+
+
+def test_merge_retimes_subtitles(videos, alignment, tmp_path):
+  left, right = videos
+  output = tmp_path / 'merged.mkv'
+
+  merge.Merge(left, right, alignment, output)
+
+  streams = media.ProbeSubtitleStreams('ffprobe', output)
+  assert [s.language for s in streams] == ['slk']
+  cues = subtitles.ParseSrt(media.ExtractSrt('ffmpeg', output,
+                                             streams[0].index))
+  assert [c.text for c in cues] == ['kept', 'moved']
+  assert cues[0].start == pytest.approx(0.5, abs=0.01)
+  assert cues[1].start == pytest.approx(2.8, abs=0.01)
+  assert cues[1].end == pytest.approx(3.3, abs=0.01)
+
+
+def test_merge_can_skip_subtitles(videos, alignment, tmp_path):
+  left, right = videos
+  output = tmp_path / 'merged.mkv'
+
+  merge.Merge(left, right, alignment, output, right_subtitles=[])
+
+  assert not media.ProbeSubtitleStreams('ffprobe', output)
