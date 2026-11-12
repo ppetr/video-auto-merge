@@ -188,3 +188,11 @@ be low enough that a real multi-frame difference is clearly cheaper to
 represent as one jump than as many short ones, but high enough that the
 model doesn't prefer jumping over a handful of merely-expensive-to-match
 frames instead of actually matching them.
+
+Real-data sweep of `c0` (one pair of differently-cut releases, c1 = 280):
+with `c0` = 2000 the path contained many 1-5 frame jumps that look like
+noise rather than real edits (21 on the first ~15 minutes, 65 over the
+whole film on the left/right side combined); `c0` = 8000 cut these to 6
+and 31 respectively while the long-range structure (and the known
+649-frame insert) stayed identical. `c0` = 16000 started to produce a
+false diagonal match at the start of the film, so 8000 is the default.

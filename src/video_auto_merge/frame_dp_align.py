@@ -631,7 +631,7 @@ class FrameDpParams:
   base case; `chunk` is how many rows of the cost matrix are swept per
   GPU call in between.
   """
-  c0: float = 2000.0
+  c0: float = 8000.0
   c1: float = 280.0
   base_size: int = 500
   chunk: int = 80
