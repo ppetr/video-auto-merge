@@ -180,3 +180,7 @@ cython_debug/
 .bazelversion
 # User-specific .bazelrc
 user.bazelrc
+
+# Local scratch space for real-data experiments (symlinks to films,
+# cached signature XML, outputs) - never committed.
+/work/
