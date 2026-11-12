@@ -16,13 +16,12 @@
 """Frame-level DP alignment between two per-frame descriptor sequences.
 
 A frame-resolution alternative to a simpler, 1-second-block banded
-Needleman-Wunsch-style alignment (`align_films.BandedAlign`, in the
-sibling `avtools` project this was split out of): no band restriction -
-every possible insertion/deletion is implicitly considered, not just
-ones near a pre-estimated offset. See
-`docs/frame_dp_align_notes.md` for why this was explored and what else was
-tried; `docs/frame_dp_align_future_work.md` for what's deliberately not
-included (constant-speed drift compensation in particular).
+Needleman-Wunsch-style alignment: no band restriction - every possible
+insertion/deletion is implicitly considered, not just ones near a
+pre-estimated offset. See `docs/frame_dp_align_notes.md` for why this was
+explored and what else was tried; `docs/frame_dp_align_future_work.md` for
+what's deliberately not included (constant-speed drift compensation in
+particular).
 
 Cost model: between frame `i` of the left sequence and frame `j` of the
 right sequence, the DP considers two kinds of edge:
@@ -618,9 +617,8 @@ class FrameDpParams:
   the values measured against a real pair of differently-cut film
   releases (see `docs/frame_dp_align_notes.md`) - a reasonable starting
   point for similar material, not a universal constant; recalibrate
-  (the same way `avtools`' `align_films.EstimateGapCost` measures
-  `gap_cost` rather than guessing it) before relying on these for a
-  very different kind of input.
+  (measuring them from the data rather than guessing) before relying on
+  these for a very different kind of input.
 
   `base_size`/`chunk` are performance knobs for `StreamingBacktrack`,
   not part of the cost model: `base_size` is the sub-grid size below
@@ -664,10 +662,8 @@ class FrameAlignmentResult:
 def _PathToResult(path: List[Tuple[str, int, int, int, int]]
                   ) -> FrameAlignmentResult:
   """Collapses a raw `(move, i0, j0, i1, j1)` segment list (one match
-  edge per segment, one segment per jump) into merged blocks - the
-  shape of result `avtools`' `align_films.AlignmentResult` already
-  uses, in frame-
-  index rather than time terms."""
+  edge per segment, one segment per jump) into merged blocks, in
+  frame-index rather than time terms."""
   aligned: List[AlignedBlock] = []
   unique: List[UniqueBlock] = []
   for move, i0, j0, i1, j1 in path:

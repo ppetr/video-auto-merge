@@ -1,9 +1,7 @@
 # Design notes: frame-level DP alignment
 
-Background for `src/frame_dp_align.py`, a frame-resolution
-alternative to a simpler, 1-second-block banded alignment
-(`align_films.BandedAlign`, in the sibling `avtools` project this
-was split out of). This document
+Background for `src/frame_dp_align.py`, a frame-resolution alternative to
+an earlier, simpler 1-second-block banded alignment. This document
 summarizes, in general terms, what was tried while developing it and what
 the outcome was - so a future reader knows which direction already turned
 out to work, without having to re-derive it. Deliberately deferred ideas
@@ -11,13 +9,13 @@ live in `frame_dp_align_future_work.md` instead of here.
 
 ## The problem, restated
 
-`BandedAlign` aligns two releases of the same film at 1-second block
-resolution, inside a band around a pre-estimated offset, with a gap
-penalty for inserted/removed content and a minimum-run-length heuristic to
-reject spurious short "matches" inside a real gap. It works, but has two
-structural weak points: the band width is a heuristic guess, and 1-second
-resolution means every matched span still needs a separate fine-alignment
-pass to reach frame accuracy.
+The earlier banded alignment aligned two releases of the same film at
+1-second block resolution, inside a band around a pre-estimated offset,
+with a gap penalty for inserted/removed content and a minimum-run-length
+heuristic to reject spurious short "matches" inside a real gap. It works,
+but has two structural weak points: the band width is a heuristic guess,
+and 1-second resolution means every matched span still needs a separate
+fine-alignment pass to reach frame accuracy.
 
 This explores whether going to full frame resolution, with no band at
 all, removes both problems at once - and whether it can still be made to

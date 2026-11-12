@@ -55,8 +55,8 @@ either way. Not pursued further unless a specific need for a smooth
 ## `FrameConfidence` weighting
 
 The MPEG-7 `signature` filter reports a per-frame confidence value
-alongside the descriptor itself; the sibling `avtools` project's
-`align_films.BandedAlign` already weighs match cost by
+alongside the descriptor itself. The earlier 1-second-block banded
+alignment weighed match cost by
 `min(confidence_left, confidence_right)` so that low-information
 frames (static/dark scenes, titles) don't force a
 falsely-confident-looking decision. `frame_dp_align` does not do this
@@ -74,10 +74,9 @@ or fail to jump where it obviously should) across several candidate
 `c0`/`c1` values is straightforward in principle, and should probably be
 done - with a proper measurement procedure, not a guess - before relying
 on the current defaults for anything beyond the material they were
-measured on. The sibling `avtools` project's
-`align_films.EstimateGapCost` is the analogous existing approach for
-the 1-second-block model; nothing equivalent exists yet
-for this frame-level model.
+measured on. The earlier 1-second-block model measured its gap cost from
+each film pair's own data rather than using a fixed constant; nothing
+equivalent exists yet for this frame-level model.
 
 ## Whole-film-scale independent cost verification
 
