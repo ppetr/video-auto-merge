@@ -225,6 +225,39 @@ def _BruteForceBacktrack(cost_matrix, c0, c1, i_offset, j_offset):
   return path
 
 
+def _FastBaseCase(cost_matrix, c0, c1, i_offset, j_offset):
+  """Same contract as `_BruteForceBacktrack`, but vectorized: the full
+  cost-to matrix comes from `FastFrameDp` (one numpy pass per row) and the
+  path is then walked back from `(N,M)`, picking at each cell the best
+  predecessor with a few array operations - O((N+M) * (N+M)) in numpy
+  instead of a Python loop over every cell."""
+  n, m = cost_matrix.shape
+  cost_to = FastFrameDp(cost_matrix, c0, c1)
+  path = []
+  i, j = n, m
+  while (i, j) != (0, 0):
+    best, move = np.inf, None
+    if i > 0 and j > 0:
+      best = cost_to[i - 1, j - 1] + cost_matrix[i - 1, j - 1]
+      move = ('diag', i - 1, j - 1)
+    if i > 0:
+      vals = cost_to[:i, j] + c0 + c1 * (i - np.arange(i))
+      k = int(np.argmin(vals))
+      if vals[k] < best:
+        best, move = vals[k], ('ijump', k, j)
+    if j > 0:
+      vals = cost_to[i, :j] + c0 + c1 * (j - np.arange(j))
+      k = int(np.argmin(vals))
+      if vals[k] < best:
+        best, move = vals[k], ('jjump', i, k)
+    name, pi, pj = move
+    path.append(
+        (name, pi + i_offset, pj + j_offset, i + i_offset, j + j_offset))
+    i, j = pi, pj
+  path.reverse()
+  return path
+
+
 def Backtrack(cost_matrix, c0, c1, base_size=40):
   """Returns the optimal path from `(0,0)` to `(N,M)` as a list of
   `(move, i0, j0, i1, j1)` segments, `move` one of `'diag'`, `'ijump'`,
@@ -534,7 +567,7 @@ def StreamingBacktrack(left_onehot,
   n_sub, m_sub = i_hi - i_lo, j_hi - j_lo
   if n_sub <= base_size or m_sub <= base_size:
     cost_sub = np.array(left_onehot[i_lo:i_hi] @ right_cost[j_lo:j_hi].T)
-    return _BruteForceBacktrack(cost_sub, c0, c1, i_lo, j_lo)
+    return _FastBaseCase(cost_sub, c0, c1, i_lo, j_lo)
 
   i_mid_local = n_sub // 2
   i_mid = i_lo + i_mid_local

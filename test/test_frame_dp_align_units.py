@@ -191,3 +191,24 @@ def test_one_hot_cost_transform_gemm_matches_l1():
   got = frame_dp_align.OneHot(left_sig) @ frame_dp_align.CostTransform(
       right_sig).T
   np.testing.assert_allclose(got, expected)
+
+
+@pytest.mark.parametrize('c0,c1', [(5.0, 1.0), (20.0, 3.0), (1.0, 0.5)])
+@pytest.mark.parametrize('shape', [(0, 7), (7, 0), (1, 1), (12, 9), (9, 30),
+                                   (40, 5)])
+def test_fast_base_case_is_optimal(c0, c1, shape):
+  rng = np.random.RandomState(7)
+  n, m = shape
+  cost = _l1_cost(_random_signatures(rng, n), _random_signatures(rng, m))
+  path = frame_dp_align._FastBaseCase(cost, c0, c1, 0, 0)  # pylint: disable=protected-access
+  ok, msg = frame_dp_align.PathEndpoints(path, n, m)
+  assert ok, msg
+  assert frame_dp_align.PathCost(path, cost, c0, c1) == pytest.approx(
+      frame_dp_align.NaiveFrameDp(cost, c0, c1)[n, m], abs=1e-6)
+
+
+def test_fast_base_case_applies_offsets():
+  cost = np.zeros((3, 3))
+  path = frame_dp_align._FastBaseCase(cost, 5.0, 1.0, 10, 20)  # pylint: disable=protected-access
+  assert path[0][1:3] == (10, 20)
+  assert path[-1][3:5] == (13, 23)
