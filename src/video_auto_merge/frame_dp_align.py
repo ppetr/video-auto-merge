@@ -661,12 +661,14 @@ class FrameDpParams:
   `base_size`/`chunk` are performance knobs for `StreamingBacktrack`,
   not part of the cost model: `base_size` is the sub-grid size below
   which Hirschberg's recursion switches to the small, full-backpointer
-  base case; `chunk` is how many rows of the cost matrix are swept per
-  GPU call in between.
+  base case (a larger value means fewer recursion nodes and so far fewer
+  JIT compilations, at the price of a dense `base_size` x M block in
+  host memory there); `chunk` is how many rows of the cost matrix are
+  swept per GPU call in between.
   """
   c0: float = 8000.0
   c1: float = 280.0
-  base_size: int = 500
+  base_size: int = 3000
   chunk: int = 80
 
 
