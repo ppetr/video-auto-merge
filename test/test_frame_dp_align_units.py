@@ -300,3 +300,17 @@ def test_align_frames_checks_resources_before_working(monkeypatch):
   with pytest.raises(MemoryError):
     frame_dp_align.AlignFrames(_random_signatures(rng, 50),
                                _random_signatures(rng, 50))
+
+
+def test_fit_chunk_shrinks_to_the_free_device_memory():
+  fit = frame_dp_align._FitChunk  # pylint: disable=protected-access
+  need = frame_dp_align._DeviceBytesNeeded  # pylint: disable=protected-access
+  m, dim = 150_000, 1140
+  assert fit(320, m, dim, None) == 320
+  assert fit(320, m, dim, 8 * 10**9) == 320
+  free = need(m, dim, 100)
+  fitted = fit(320, m, dim, free)
+  assert 99 <= fitted <= 100
+  assert need(m, dim, fitted) <= free
+  assert fit(320, m, dim, 1) == 8
+  assert fit(4, m, dim, 1) == 4

@@ -675,8 +675,9 @@ class FrameDpParams:
   which Hirschberg's recursion switches to the small, full-backpointer
   base case (a larger value means fewer recursion nodes and so far fewer
   JIT compilations, at the price of a dense `base_size` x M block in
-  host memory there); `chunk` is how many rows of the cost matrix are
-  swept per GPU call in between. `max_base_cells` caps the size of that
+  host memory there); `chunk` is the most rows of the cost matrix swept per
+  GPU call in between (`AlignFrames` lowers it when the free device memory
+  cannot hold a `chunk` x M block). `max_base_cells` caps the size of that
   dense block (`None`: derived from the host memory available when
   `AlignFrames` starts), so that a thin but very long sub-range is split
   further instead of exhausting memory.
@@ -684,7 +685,7 @@ class FrameDpParams:
   c0: float = 8000.0
   c1: float = 280.0
   base_size: int = 8000
-  chunk: int = 80
+  chunk: int = 320
   max_base_cells: Optional[int] = None
 
 
@@ -775,6 +776,25 @@ def _AutoMaxBaseCells(available_bytes: Optional[int]) -> int:
   return min(max(cells, low), high)
 
 
+_MIN_CHUNK = 8
+
+
+def _DeviceBytesNeeded(m: int, dim: int, chunk: int) -> int:
+  return int(
+      (m * dim + chunk * m + chunk * dim + 6 * (m + 1)) * 4 * _DEVICE_HEADROOM)
+
+
+def _FitChunk(chunk: int, m: int, dim: int, device_free: Optional[int]) -> int:
+  """Largest chunk <= `chunk` whose block fits in `device_free` (at least
+  `_MIN_CHUNK`; `_CheckResources` reports it if even that does not fit)."""
+  if device_free is None:
+    return chunk
+  fixed = _DeviceBytesNeeded(m, dim, 0)
+  per_row = _DeviceBytesNeeded(m, dim, 1) - fixed
+  fitting = (device_free - fixed) // per_row
+  return max(min(chunk, int(fitting)), min(chunk, _MIN_CHUNK))
+
+
 def _CheckResources(n: int, m: int, dim: int, chunk: int,
                     max_base_cells: int) -> None:
   """Fails early, with the numbers, if the host or the device cannot hold
@@ -792,8 +812,7 @@ def _CheckResources(n: int, m: int, dim: int, chunk: int,
         f'aligning {n} x {m} frames needs about {host_need / 1e9:.1f} GB of '
         f'host memory, {host_free / 1e9:.1f} GB is available (lower '
         '`max_base_cells` or align shorter inputs)')
-  device_need = int(
-      (m * dim + chunk * m + chunk * dim + 6 * (m + 1)) * 4 * _DEVICE_HEADROOM)
+  device_need = _DeviceBytesNeeded(m, dim, chunk)
   device_free = _DeviceFreeBytes()
   if device_free is not None and device_need > device_free:
     raise MemoryError(
@@ -825,7 +844,9 @@ def AlignFrames(
   max_base_cells = params.max_base_cells
   if max_base_cells is None:
     max_base_cells = _AutoMaxBaseCells(_AvailableHostBytes())
-  _CheckResources(n, m, 3 * left_sig.shape[1], params.chunk, max_base_cells)
+  dim = 3 * left_sig.shape[1]
+  chunk = _FitChunk(params.chunk, m, dim, _DeviceFreeBytes())
+  _CheckResources(n, m, dim, chunk, max_base_cells)
 
   left_onehot = OneHot(left_sig)
   right_cost = CostTransform(right_sig)
@@ -834,5 +855,5 @@ def AlignFrames(
 
   path = StreamingBacktrack(left_onehot, right_cost, left_onehot_rev,
                             right_cost_rev, params.c0, params.c1, n, m, 0, n, 0,
-                            m, params.base_size, params.chunk, max_base_cells)
+                            m, params.base_size, chunk, max_base_cells)
   return _PathToResult(path)
