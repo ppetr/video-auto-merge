@@ -683,7 +683,7 @@ class FrameDpParams:
   """
   c0: float = 8000.0
   c1: float = 280.0
-  base_size: int = 3000
+  base_size: int = 8000
   chunk: int = 80
   max_base_cells: Optional[int] = None
 
