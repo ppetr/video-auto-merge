@@ -63,4 +63,7 @@ from test_frame_dp_align_units import (
     test_streaming_backtrack_matches_naive_optimum,
     test_align_frames_finds_a_right_side_insert,
     test_one_hot_cost_transform_gemm_matches_l1,
+    test_fast_base_case_is_optimal,
+    test_fast_base_case_applies_offsets,
+    test_cell_cap_keeps_the_optimum_and_forces_splits,
 )

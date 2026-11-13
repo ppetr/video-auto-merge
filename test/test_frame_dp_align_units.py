@@ -167,13 +167,25 @@ def test_streaming_backtrack_matches_naive_optimum(c0, c1):
     assert got_cost == pytest.approx(true_total, abs=1e-2)
 
 
-def test_align_frames_finds_a_right_side_insert():
+# (parameter overrides, whether the recursion must split at all) - the
+# same 30 x 45 problem solved as a single base case, by splitting down to
+# a tiny `base_size`, and by splitting because of the cell cap alone.
+_INSERT_PARAMS = [
+    pytest.param({}, False, id='defaults'),
+    pytest.param({'base_size': 4}, True, id='small-base-size'),
+    pytest.param({'max_base_cells': 200}, True, id='cell-cap'),
+]
+
+
+@pytest.mark.parametrize('overrides,splits', _INSERT_PARAMS)
+def test_align_frames_finds_a_right_side_insert(overrides, splits):
   rng = np.random.RandomState(5)
   left_sig = _random_signatures(rng, 30)
   extra = _random_signatures(rng, 15)
   right_sig = np.concatenate([left_sig[:10], extra, left_sig[10:]])
+  frame_dp_align.SPLIT_STATS.update(node=0, in_flight=0)
 
-  params = frame_dp_align.FrameDpParams(c0=5.0, c1=0.1, base_size=4, chunk=3)
+  params = frame_dp_align.FrameDpParams(c0=5.0, c1=0.1, chunk=3, **overrides)
   result = frame_dp_align.AlignFrames(left_sig, right_sig, params)
 
   assert result.unique == [frame_dp_align.UniqueBlock('right', 10, 25)]
@@ -181,6 +193,7 @@ def test_align_frames_finds_a_right_side_insert():
       frame_dp_align.AlignedBlock(0, 10, 0, 10),
       frame_dp_align.AlignedBlock(10, 30, 25, 45),
   ]
+  assert (sum(frame_dp_align.SPLIT_STATS.values()) > 0) == splits
 
 
 def test_one_hot_cost_transform_gemm_matches_l1():
@@ -212,3 +225,78 @@ def test_fast_base_case_applies_offsets():
   path = frame_dp_align._FastBaseCase(cost, 5.0, 1.0, 10, 20)  # pylint: disable=protected-access
   assert path[0][1:3] == (10, 20)
   assert path[-1][3:5] == (13, 23)
+
+
+def _streaming_path(left_sig, right_sig, c0, c1, **kwargs):
+  n, m = len(left_sig), len(right_sig)
+  return frame_dp_align.StreamingBacktrack(
+      _one_hot_ternary(left_sig), _cost_transform_ternary(right_sig),
+      _one_hot_ternary(left_sig[::-1]),
+      _cost_transform_ternary(right_sig[::-1]), c0, c1, n, m, 0, n, 0, m,
+      **kwargs)
+
+
+@pytest.mark.parametrize('max_base_cells', [1, 50, 400, 100000])
+def test_cell_cap_keeps_the_optimum_and_forces_splits(max_base_cells):
+  c0, c1 = 5.0, 1.0
+  rng = np.random.RandomState(11)
+  for n, m in [(9, 90), (40, 12), (25, 25)]:
+    left_sig = _random_signatures(rng, n)
+    right_sig = _random_signatures(rng, m)
+    cost = _l1_cost(left_sig, right_sig)
+    frame_dp_align.SPLIT_STATS.update(node=0, in_flight=0)
+
+    path = _streaming_path(left_sig,
+                           right_sig,
+                           c0,
+                           c1,
+                           base_size=1000,
+                           chunk=3,
+                           max_base_cells=max_base_cells)
+
+    ok, msg = frame_dp_align.PathEndpoints(path, n, m)
+    assert ok, msg
+    assert frame_dp_align.PathCost(path, cost, c0, c1) == pytest.approx(
+        frame_dp_align.NaiveFrameDp(cost, c0, c1)[n, m], abs=1e-2)
+    splits = sum(frame_dp_align.SPLIT_STATS.values())
+    assert (splits > 0) == (n * m > max_base_cells)
+
+
+def test_auto_max_base_cells_scales_with_memory_and_is_clamped():
+  auto = frame_dp_align._AutoMaxBaseCells  # pylint: disable=protected-access
+  assert auto(None) == 50_000_000
+  assert auto(4_000_000_000) == int(4e9 * 0.25 / 16)
+  assert auto(1000) == 1_000_000
+  assert auto(10**15) == 500_000_000
+
+
+def _patch_memory(monkeypatch, host, device):
+  monkeypatch.setattr(frame_dp_align, '_AvailableHostBytes', lambda: host)
+  monkeypatch.setattr(frame_dp_align, '_DeviceFreeBytes', lambda: device)
+
+
+def test_resource_check_passes_with_enough_memory(monkeypatch):
+  _patch_memory(monkeypatch, 64 * 10**9, 8 * 10**9)
+  frame_dp_align._CheckResources(150_000, 150_000, 1140, 80, 10**8)  # pylint: disable=protected-access
+
+
+def test_resource_check_skips_unknown_memory(monkeypatch):
+  _patch_memory(monkeypatch, None, None)
+  frame_dp_align._CheckResources(10**7, 10**7, 1140, 80, 10**8)  # pylint: disable=protected-access
+
+
+@pytest.mark.parametrize('host,device,what', [(10**9, 8 * 10**9, 'host'),
+                                              (64 * 10**9, 10**8, 'device')])
+def test_resource_check_fails_early_with_numbers(monkeypatch, host, device,
+                                                 what):
+  _patch_memory(monkeypatch, host, device)
+  with pytest.raises(MemoryError, match=what):
+    frame_dp_align._CheckResources(150_000, 150_000, 1140, 80, 10**7)  # pylint: disable=protected-access
+
+
+def test_align_frames_checks_resources_before_working(monkeypatch):
+  _patch_memory(monkeypatch, 1000, None)
+  rng = np.random.RandomState(0)
+  with pytest.raises(MemoryError):
+    frame_dp_align.AlignFrames(_random_signatures(rng, 50),
+                               _random_signatures(rng, 50))

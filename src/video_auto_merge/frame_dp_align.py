@@ -43,7 +43,7 @@ is the public entry point tying all of that together.
 """
 import dataclasses
 import functools
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -552,7 +552,8 @@ def StreamingBacktrack(left_onehot,
                        j_lo,
                        j_hi,
                        base_size=500,
-                       chunk=300):
+                       chunk=300,
+                       max_base_cells=None):
   """Same contract as `Backtrack`, but using the GPU streaming
   checkpoints above instead of full-matrix `FastFrameDp`/
   `BackwardFrameDp` - usable at whole-film scale (only the base case
@@ -563,9 +564,16 @@ def StreamingBacktrack(left_onehot,
   full reversals) - the same arrays at every recursion level; slicing to
   the current sub-range happens internally. `n_total`/`m_total` are the
   full sequence lengths (needed to correctly slice the reversed arrays
-  for a sub-range)."""
+  for a sub-range).
+
+  A sub-range is solved directly as a base case when one of its sides has
+  at most `base_size` frames *and* its dense cost block has at most
+  `max_base_cells` cells (`None`: no limit); a thin but very long
+  sub-range keeps being split instead of materializing a huge block."""
   n_sub, m_sub = i_hi - i_lo, j_hi - j_lo
-  if n_sub <= base_size or m_sub <= base_size:
+  small = n_sub <= base_size or m_sub <= base_size
+  fits = max_base_cells is None or n_sub * m_sub <= max_base_cells
+  if n_sub <= 1 or (small and fits):
     cost_sub = np.array(left_onehot[i_lo:i_hi] @ right_cost[j_lo:j_hi].T)
     return _FastBaseCase(cost_sub, c0, c1, i_lo, j_lo)
 
@@ -595,10 +603,12 @@ def StreamingBacktrack(left_onehot,
     SPLIT_STATS['node'] += 1
     left = StreamingBacktrack(left_onehot, right_cost, left_onehot_rev,
                               right_cost_rev, c0, c1, n_total, m_total, i_lo,
-                              i_mid, j_lo, j_star, base_size, chunk)
+                              i_mid, j_lo, j_star, base_size, chunk,
+                              max_base_cells)
     right = StreamingBacktrack(left_onehot, right_cost, left_onehot_rev,
                                right_cost_rev, c0, c1, n_total, m_total, i_mid,
-                               i_hi, j_star, j_hi, base_size, chunk)
+                               i_hi, j_star, j_hi, base_size, chunk,
+                               max_base_cells)
     return left + right
 
   SPLIT_STATS['in_flight'] += 1
@@ -612,11 +622,13 @@ def StreamingBacktrack(left_onehot,
 
   left = StreamingBacktrack(left_onehot, right_cost, left_onehot_rev,
                             right_cost_rev, c0, c1, n_total, m_total, i_lo,
-                            i_source, j_lo, j_star, base_size, chunk)
+                            i_source, j_lo, j_star, base_size, chunk,
+                            max_base_cells)
   jump_segment = [('ijump', i_source, j_star, i_dest, j_star)]
   right = StreamingBacktrack(left_onehot, right_cost, left_onehot_rev,
                              right_cost_rev, c0, c1, n_total, m_total, i_dest,
-                             i_hi, j_star, j_hi, base_size, chunk)
+                             i_hi, j_star, j_hi, base_size, chunk,
+                             max_base_cells)
   return left + jump_segment + right
 
 
@@ -664,12 +676,16 @@ class FrameDpParams:
   base case (a larger value means fewer recursion nodes and so far fewer
   JIT compilations, at the price of a dense `base_size` x M block in
   host memory there); `chunk` is how many rows of the cost matrix are
-  swept per GPU call in between.
+  swept per GPU call in between. `max_base_cells` caps the size of that
+  dense block (`None`: derived from the host memory available when
+  `AlignFrames` starts), so that a thin but very long sub-range is split
+  further instead of exhausting memory.
   """
   c0: float = 8000.0
   c1: float = 280.0
   base_size: int = 3000
   chunk: int = 80
+  max_base_cells: Optional[int] = None
 
 
 @dataclasses.dataclass
@@ -723,6 +739,70 @@ def _PathToResult(
   return FrameAlignmentResult(aligned=aligned, unique=unique)
 
 
+_BYTES_PER_BASE_CELL = 16  # float64 DP matrix, float32 cost block, temporaries.
+_BASE_MEMORY_FRACTION = 0.25  # Of the available host memory.
+_MAX_BASE_CELLS_RANGE = (1_000_000, 500_000_000)
+_UNKNOWN_MEMORY_BASE_CELLS = 50_000_000
+_DEVICE_HEADROOM = 1.5  # XLA temporaries on top of the arrays we know of.
+
+
+def _AvailableHostBytes() -> Optional[int]:
+  """Host memory that can be allocated now (`MemAvailable`), if known."""
+  try:
+    with open('/proc/meminfo', encoding='ascii') as meminfo:
+      for line in meminfo:
+        if line.startswith('MemAvailable:'):
+          return int(line.split()[1]) * 1024
+  except (OSError, ValueError, IndexError):
+    pass
+  return None
+
+
+def _DeviceFreeBytes() -> Optional[int]:
+  """Free memory of the default jax device, if it reports any (a GPU does,
+  the CPU backend does not)."""
+  stats = jax.local_devices()[0].memory_stats()
+  if not stats or 'bytes_limit' not in stats:
+    return None
+  return stats['bytes_limit'] - stats.get('bytes_in_use', 0)
+
+
+def _AutoMaxBaseCells(available_bytes: Optional[int]) -> int:
+  if available_bytes is None:
+    return _UNKNOWN_MEMORY_BASE_CELLS
+  cells = int(available_bytes * _BASE_MEMORY_FRACTION / _BYTES_PER_BASE_CELL)
+  low, high = _MAX_BASE_CELLS_RANGE
+  return min(max(cells, low), high)
+
+
+def _CheckResources(n: int, m: int, dim: int, chunk: int,
+                    max_base_cells: int) -> None:
+  """Fails early, with the numbers, if the host or the device cannot hold
+  what `StreamingBacktrack` needs for `n` x `m` frames and `dim`-wide
+  encoded descriptors - instead of an out-of-memory error hours in.
+
+  The host holds the encodings of both sequences and their reversals plus
+  one base-case block; the device holds the encoded right sequence and
+  one `chunk` x `m` block of costs.
+  """
+  host_need = 2 * (n + m) * dim * 4 + max_base_cells * _BYTES_PER_BASE_CELL
+  host_free = _AvailableHostBytes()
+  if host_free is not None and host_need > host_free:
+    raise MemoryError(
+        f'aligning {n} x {m} frames needs about {host_need / 1e9:.1f} GB of '
+        f'host memory, {host_free / 1e9:.1f} GB is available (lower '
+        '`max_base_cells` or align shorter inputs)')
+  device_need = int(
+      (m * dim + chunk * m + chunk * dim + 6 * (m + 1)) * 4 * _DEVICE_HEADROOM)
+  device_free = _DeviceFreeBytes()
+  if device_free is not None and device_need > device_free:
+    raise MemoryError(
+        f'aligning against {m} right-side frames needs about '
+        f'{device_need / 1e9:.1f} GB of device memory, '
+        f'{device_free / 1e9:.1f} GB is free (use a smaller `chunk`, put the '
+        'shorter video on the right, or align shorter inputs)')
+
+
 def AlignFrames(
     left_signatures: npt.ArrayLike,
     right_signatures: npt.ArrayLike,
@@ -742,6 +822,10 @@ def AlignFrames(
   left_sig = np.asarray(left_signatures)
   right_sig = np.asarray(right_signatures)
   n, m = left_sig.shape[0], right_sig.shape[0]
+  max_base_cells = params.max_base_cells
+  if max_base_cells is None:
+    max_base_cells = _AutoMaxBaseCells(_AvailableHostBytes())
+  _CheckResources(n, m, 3 * left_sig.shape[1], params.chunk, max_base_cells)
 
   left_onehot = OneHot(left_sig)
   right_cost = CostTransform(right_sig)
@@ -750,5 +834,5 @@ def AlignFrames(
 
   path = StreamingBacktrack(left_onehot, right_cost, left_onehot_rev,
                             right_cost_rev, params.c0, params.c1, n, m, 0, n, 0,
-                            m, params.base_size, params.chunk)
+                            m, params.base_size, params.chunk, max_base_cells)
   return _PathToResult(path)

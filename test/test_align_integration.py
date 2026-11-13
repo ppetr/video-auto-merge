@@ -26,15 +26,22 @@ pytestmark = pytest.mark.skipif(not shutil.which('ffmpeg'),
                                 reason='ffmpeg not on PATH')
 
 
+@pytest.mark.parametrize('max_base_cells,splits', [(None, False), (2000, True)])
 def test_detects_a_segment_present_only_in_the_right_video(
-    tmp_path, inserted_segment_videos):
+    tmp_path, inserted_segment_videos, max_base_cells, splits):
   left, right = inserted_segment_videos.paths
+  frame_dp_align.SPLIT_STATS.update(node=0, in_flight=0)
 
   alignment = align.AlignVideos(left,
                                 right,
                                 tmp_path / 'cache',
-                                frame_dp_align.FrameDpParams(c0=500.0, c1=50.0),
+                                frame_dp_align.FrameDpParams(
+                                    c0=500.0,
+                                    c1=50.0,
+                                    max_base_cells=max_base_cells),
                                 pre_input_args=[])
+
+  assert (sum(frame_dp_align.SPLIT_STATS.values()) > 0) == splits
 
   fps = inserted_segment_videos.fps
   seconds = inserted_segment_videos.segment_seconds
